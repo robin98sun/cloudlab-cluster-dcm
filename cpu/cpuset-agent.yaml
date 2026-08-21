@@ -4,14 +4,23 @@
 # the static CPU manager is exclusive-XOR-shared per container. This agent
 # writes cgroup v2 cpusets directly to get both.
 #
-# Contract (pod annotations):
-#   testbed/dedicated-cpus: "4-7"    cores only this pod may use
-#   testbed/shared-cpus:    "12-23"  burst pool (may be shared with others)
-#   testbed/cpu-weight:     "5000"   cgroup v2 cpu.weight in the shared pool
+# Contract (pod annotations) -- COUNTS, not CPU ids, so the same manifests
+# work on any node size:
+#   testbed/dedicated-cores: "2"     physical cores reserved for this pod
+#   testbed/cpu-weight:      "5000"  cgroup v2 cpu.weight in the shared pool
+#   testbed/dedicated-cpus:  "4-7"   escape hatch: explicit thread ids
 #
-# Resulting cpuset = dedicated + shared. Pods on the node WITHOUT a dedicated
-# annotation are confined to the shared pool, which is what makes "dedicated"
-# actually dedicated.
+# The agent reads the node topology and allocates whole PHYSICAL cores --
+# both SMT siblings go to the same pod. Splitting siblings would let a
+# neighbour on the sibling thread contend for the same execution units, so
+# "dedicated" would not be dedicated.
+#
+# Node policy (ConfigMap cpuset-policy, /policy/policy.json):
+#   system_reserve_cores  physical cores left to the system and node agents
+#   shared_pool_cores     size of the burst pool (0 = all remaining cores)
+#
+# Resulting cpuset = dedicated + shared pool. Pods without a dedicated
+# request, plus system.slice, are confined to the shared pool.
 #
 # Deliberately no CPU *limits* on measured pods: a limit installs a CFS quota
 # whose 100ms periods inject latency artifacts into knee detection. Isolation
@@ -38,6 +47,16 @@ subjects: [{kind: ServiceAccount, name: cpuset-agent, namespace: kube-system}]
 ---
 apiVersion: v1
 kind: ConfigMap
+metadata: {name: cpuset-policy, namespace: kube-system}
+data:
+  policy.json: |
+    {
+      "system_reserve_cores": 2,
+      "shared_pool_cores": 0
+    }
+---
+apiVersion: v1
+kind: ConfigMap
 metadata: {name: cpuset-agent-code, namespace: kube-system}
 data:
   agent.py: |
@@ -47,16 +66,17 @@ data:
                              os.environ["KUBERNETES_SERVICE_PORT"])
     NODE = os.environ["NODE_NAME"]
     SA = "/var/run/secrets/kubernetes.io/serviceaccount"
-    CG = "/host/sys/fs/cgroup"
+    SYS = "/host/sys"
+    CG = SYS + "/fs/cgroup"
+    POLICY_FILE = "/policy/policy.json"
     TOKEN = open(SA + "/token").read().strip()
     CTX = ssl.create_default_context(cafile=SA + "/ca.crt")
+    NODE_CPUS = set(os.sched_getaffinity(0))
 
     def api(path):
         r = urllib.request.Request(API + path,
                                    headers={"Authorization": "Bearer " + TOKEN})
         return json.load(urllib.request.urlopen(r, context=CTX, timeout=10))
-
-    NODE_CPUS = set(os.sched_getaffinity(0))
 
     def parse_set(spec):
         out = set()
@@ -73,6 +93,31 @@ data:
 
     def fmt(cpus):
         return ",".join(str(c) for c in sorted(cpus))
+
+    def policy():
+        try:
+            with open(POLICY_FILE) as fh:
+                p = json.load(fh)
+        except (OSError, ValueError):
+            p = {}
+        return (int(p.get("system_reserve_cores", 2)),
+                int(p.get("shared_pool_cores", 0)))
+
+    def physical_cores():
+        """[[thread ids], ...] ordered by first thread id. Whole cores only."""
+        seen, cores = set(), []
+        for cpu in sorted(NODE_CPUS):
+            if cpu in seen:
+                continue
+            path = SYS + "/devices/system/cpu/cpu%d/topology/thread_siblings_list" % cpu
+            try:
+                sibs = parse_set(open(path).read().strip()) & NODE_CPUS
+            except OSError:
+                sibs = {cpu}
+            sibs = sibs or {cpu}
+            seen |= sibs
+            cores.append(sorted(sibs))
+        return cores
 
     def pod_slices(uid):
         u = uid.replace("-", "_")
@@ -92,60 +137,96 @@ data:
             print("  warn %s <- %r: %s" % (path, val, e), flush=True)
             return False
 
-    def reconcile():
+    def plan():
+        """Derive concrete cpusets from node topology + declared counts."""
+        sys_reserve, shared_size = policy()
+        cores = physical_cores()
         pods = api("/api/v1/pods?fieldSelector=spec.nodeName=%s" % NODE)["items"]
-        # union of every dedicated set on this node; non-dedicated pods must
-        # be kept out of all of them.
-        all_dedicated = set()
-        plans = []
+
+        wants, explicit = [], []
         for p in pods:
             if p.get("status", {}).get("phase") != "Running":
                 continue
-            ann = (p["metadata"].get("annotations") or {})
-            ded = parse_set(ann.get("testbed/dedicated-cpus"))
-            sh = parse_set(ann.get("testbed/shared-cpus"))
-            wt = ann.get("testbed/cpu-weight")
-            all_dedicated |= ded
-            plans.append((p["metadata"]["name"], p["metadata"]["uid"], ded, sh, wt))
-        applied = 0
-        # Dedication only holds if everything else is kept off those cores:
-        # unannotated pods AND the system slice get node-minus-dedicated.
-        rest = NODE_CPUS - all_dedicated
+            md = p["metadata"]
+            ann = md.get("annotations") or {}
+            key = (md["namespace"], md["name"], md["uid"])
+            if ann.get("testbed/dedicated-cpus"):        # escape hatch
+                explicit.append((key, parse_set(ann["testbed/dedicated-cpus"]),
+                                 ann.get("testbed/cpu-weight")))
+            elif ann.get("testbed/dedicated-cores"):
+                wants.append((key, int(ann["testbed/dedicated-cores"]),
+                              ann.get("testbed/cpu-weight")))
+        # deterministic order so allocations are stable across reconciles
+        wants.sort(key=lambda w: (w[0][0], w[0][1]))
+        explicit.sort(key=lambda w: (w[0][0], w[0][1]))
+
+        avail = list(cores[sys_reserve:])       # system keeps the first cores
+        assigned, dedicated_all = [], set()
+        for key, ded_set, wt in explicit:
+            dedicated_all |= ded_set
+            assigned.append((key, ded_set, wt))
+            avail = [c for c in avail if not (set(c) & ded_set)]
+        for key, n, wt in wants:
+            if len(avail) < n:
+                print("  WARN %s/%s wants %d cores, %d left -- unassigned"
+                      % (key[0], key[1], n, len(avail)), flush=True)
+                continue
+            take, avail = avail[:n], avail[n:]
+            ded = {t for c in take for t in c}
+            dedicated_all |= ded
+            assigned.append((key, ded, wt))
+
+        pool_cores = avail if shared_size <= 0 else avail[:shared_size]
+        shared = {t for c in pool_cores for t in c}
+        if not shared:                          # never leave a pod with nothing
+            shared = {t for c in cores[:sys_reserve] for t in c}
+        return assigned, shared, dedicated_all, pods
+
+    def reconcile():
+        assigned, shared, dedicated_all, pods = plan()
+        rest = (NODE_CPUS - dedicated_all) or shared
         for path in (CG + "/system.slice", CG + "/init.scope"):
-            if os.path.isdir(path) and all_dedicated and rest:
+            if os.path.isdir(path) and dedicated_all:
                 write(path + "/cpuset.cpus", fmt(rest))
-        for name, uid, ded, sh, wt in plans:
-            cpus = (ded | sh) if (ded or sh) else set(rest)
-            # other pods' dedicated cores are never available to this pod
-            cpus -= (all_dedicated - ded)
+
+        planned = {k[2]: (ded, wt) for k, ded, wt in assigned}
+        applied = 0
+        for p in pods:
+            if p.get("status", {}).get("phase") != "Running":
+                continue
+            uid = p["metadata"]["uid"]
+            ded, wt = planned.get(uid, (set(), None))
+            cpus = (ded | shared) if ded else set(rest)
             if not cpus:
                 continue
-            for slice_dir in pod_slices(uid):
+            for sl in pod_slices(uid):
                 cur = ""
                 try:
-                    cur = open(slice_dir + "/cpuset.cpus").read().strip()
+                    cur = open(sl + "/cpuset.cpus").read().strip()
                 except OSError:
                     pass
-                want = fmt(cpus)
-                # kernel normalises to ranges ("4-7,16-27"); compare as sets
                 if parse_set(cur) != cpus:
-                    if write(slice_dir + "/cpuset.cpus", want):
-                        print("set %-14s %s (dedicated=%s shared=%s)"
-                              % (name, want, fmt(ded) or "-", fmt(sh) or "-"),
-                              flush=True)
+                    if write(sl + "/cpuset.cpus", fmt(cpus)):
+                        print("set %-16s %s (dedicated=%s)"
+                              % (p["metadata"]["name"], fmt(cpus),
+                                 fmt(ded) or "-"), flush=True)
                         applied += 1
                 if wt:
-                    write(slice_dir + "/cpu.weight", wt)
-        return applied, len(plans)
+                    write(sl + "/cpu.weight", wt)
+        return applied, len(planned), fmt(shared)
 
     if __name__ == "__main__":
-        print("cpuset-agent on %s" % NODE, flush=True)
+        cores = physical_cores()
+        print("cpuset-agent on %s: %d threads, %d physical cores, smt=%d"
+              % (NODE, len(NODE_CPUS), len(cores),
+                 len(cores[0]) if cores else 1), flush=True)
         while True:
             try:
-                a, n = reconcile()
+                a, n, sh = reconcile()
                 if a:
-                    print("reconciled %d/%d pods" % (a, n), flush=True)
-            except Exception as e:                      # keep the loop alive
+                    print("reconciled %d pods (%d planned), shared pool=%s"
+                          % (a, n, sh), flush=True)
+            except Exception as e:
                 print("error: %r" % e, flush=True)
             time.sleep(10)
 ---
@@ -171,9 +252,11 @@ spec:
           valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
         volumeMounts:
         - {name: code, mountPath: /code}
-        - {name: cgroup, mountPath: /host/sys/fs/cgroup}
+        - {name: policy, mountPath: /policy}
+        - {name: sys, mountPath: /host/sys}
         resources:
           requests: {cpu: "50m", memory: "64Mi"}
       volumes:
       - {name: code, configMap: {name: cpuset-agent-code}}
-      - {name: cgroup, hostPath: {path: /sys/fs/cgroup}}
+      - {name: policy, configMap: {name: cpuset-policy}}
+      - {name: sys, hostPath: {path: /sys}}

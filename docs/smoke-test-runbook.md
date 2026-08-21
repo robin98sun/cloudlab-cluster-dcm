@@ -151,7 +151,37 @@ auth on the apiserver (reusing the cluster join token) and each agent writes
 its own admin kubeconfig at boot. Deliberate testbed trade-off: every node
 holds admin credentials.
 
-## 8. Networks
+## 8. CPU placement
+
+Measured pods declare **physical-core counts**, never CPU ids:
+
+```yaml
+annotations:
+  testbed/dedicated-cores: "2"     # agent picks which cores
+  testbed/cpu-weight: "5000"       # shared-pool arbitration
+```
+
+`cpu/cpuset-agent.yaml` reads the node's real topology and allocates whole
+physical cores (both SMT siblings together -- splitting them would let a
+neighbour contend for the same execution units). Everything else, including
+`system.slice`, is confined off the dedicated set. Node policy lives in the
+`cpuset-policy` ConfigMap:
+
+| key | meaning |
+|---|---|
+| `system_reserve_cores` | physical cores left to the system and node agents |
+| `shared_pool_cores` | burst-pool size (0 = all remaining) |
+
+Nothing assumes a core count or SMT width, so the same manifests work on any
+node type. `testbed/dedicated-cpus: "4-7"` remains as an explicit-pinning
+escape hatch.
+
+**No CPU limits anywhere on measured pods.** A limit installs a CFS quota
+whose 100ms periods inject latency artifacts into knee detection; isolation
+comes from cpusets, contention from `cpu.weight`. Verify with
+`cpu.max = max` and zero `nr_throttled`.
+
+## 9. Networks
 
 Client and backend LANs carry only benchmark traffic. Everything else — k3s
 API, kubelet, flannel, monitoring, SSH — rides CloudLab's control network.
@@ -159,7 +189,7 @@ Measured pods use `hostNetwork`, so the CNI overlay never touches the measured
 path. Telemetry is written locally during runs and shipped by `make collect`
 afterwards.
 
-## 9. Seams for the system under test
+## 10. Seams for the system under test
 
 - `services/admission_stub.py` — `PassThroughAdmission` is the seam where a real
   admission controller plugs in; the bucket accounting is already wired.
