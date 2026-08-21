@@ -16,28 +16,56 @@ import json
 PY_IMAGE = "docker.io/library/python:3.11-slim"
 LETTERS = "abcdefghij"
 
+# CPU plan (see cpu/cpuset-agent.yaml). Cores 0-3 stay with the system and
+# node agents; each measured pod gets dedicated cores plus a shared burst
+# pool. Requests are set for scheduling; limits are deliberately NEVER set,
+# because a CPU limit installs a CFS quota whose 100ms periods inject
+# latency artifacts into knee detection.
+FE_DEDICATED_PER_POD = 2
+FE_FIRST_CORE = 4
+DB_DEDICATED = "4-7"
+LG_DEDICATED = "4-11"
+SHARED_POOL = "16-27"
 
-def pod(name, node, kind, command, volumes, mounts):
+
+def cpu_annotations(dedicated, weight="5000"):
+    return {
+        "testbed/dedicated-cpus": dedicated,
+        "testbed/shared-cpus": SHARED_POOL,
+        "testbed/cpu-weight": weight,
+    }
+
+
+def pod(name, node, kind, command, volumes, mounts, annotations=None,
+        cpu_request=None):
+    meta = {
+        "name": name,
+        "namespace": "testbed",
+        "labels": {"app": "testbed", "testbed/kind": kind},
+    }
+    if annotations:
+        meta["annotations"] = annotations
+    container = {
+        "name": kind,
+        "image": PY_IMAGE,
+        "imagePullPolicy": "IfNotPresent",
+        "command": command,
+        "volumeMounts": mounts,
+    }
+    if cpu_request:
+        # requests only -- never limits (see CPU plan note above)
+        container["resources"] = {"requests": {"cpu": cpu_request,
+                                               "memory": "1Gi"}}
     return {
         "apiVersion": "v1",
         "kind": "Pod",
-        "metadata": {
-            "name": name,
-            "namespace": "testbed",
-            "labels": {"app": "testbed", "testbed/kind": kind},
-        },
+        "metadata": meta,
         "spec": {
             "nodeSelector": {"kubernetes.io/hostname": node},
             "hostNetwork": True,
             "dnsPolicy": "Default",
             "restartPolicy": "Always",
-            "containers": [{
-                "name": kind,
-                "image": PY_IMAGE,
-                "imagePullPolicy": "IfNotPresent",
-                "command": command,
-                "volumeMounts": mounts,
-            }],
+            "containers": [container],
             "volumes": volumes,
         },
     }
@@ -57,6 +85,10 @@ def main():
     p.add_argument("--fe-instances", type=int, default=3)
     p.add_argument("--fe-base-port", type=int, default=8081)
     p.add_argument("--db-port", type=int, default=9091)
+    p.add_argument("--no-db", action="store_true",
+                   help="skip stub storage pods (a real storage tier is deployed)")
+    p.add_argument("--lg-host", default="ctl1",
+                   help="host for the load-generator pod")
     p.add_argument("--out", default="testbed.yaml")
     a = p.parse_args()
 
@@ -79,6 +111,8 @@ def main():
         for i in range(a.fe_instances):
             name = "fe%d-%s" % (j, LETTERS[i])
             port = a.fe_base_port + i
+            first = FE_FIRST_CORE + i * FE_DEDICATED_PER_POD
+            ded = "%d-%d" % (first, first + FE_DEDICATED_PER_POD - 1)
             items.append(pod(
                 name, "fe%d" % j, "fe",
                 ["python3", "/repo/services/stub_fe.py",
@@ -87,16 +121,29 @@ def main():
                  "--db-port", str(a.db_port),
                  "--destinations-file", "/local/testbed/destinations.json",
                  "--telemetry-dir", "/local/testbed/telemetry"],
-                common_volumes, common_mounts))
+                common_volumes, common_mounts,
+                annotations=cpu_annotations(ded),
+                cpu_request=str(FE_DEDICATED_PER_POD)))
 
-    for k in range(1, a.db_hosts + 1):
+    for k in range(1, 0 if a.no_db else a.db_hosts + 1):
         items.append(pod(
             "db%d" % k, "db%d" % k, "db",
             ["python3", "/repo/services/stub_db.py",
              "--port", str(a.db_port),
              "--data-dir", "/data/store"],
             common_volumes + [host_path("data", "/mnt/data", create=True)],
-            common_mounts + [{"name": "data", "mountPath": "/data"}]))
+            common_mounts + [{"name": "data", "mountPath": "/data"}],
+            annotations=cpu_annotations(DB_DEDICATED),
+            cpu_request="4"))
+
+    # Load generator pod on the ctl host (or a dedicated lg host when the
+    # measurement preset allocates one). Idle until the harness drives it.
+    items.append(pod(
+        "lg1", a.lg_host, "lg",
+        ["sleep", "infinity"],
+        common_volumes, common_mounts,
+        annotations=cpu_annotations(LG_DEDICATED, weight="10000"),
+        cpu_request="8"))
 
     doc = {"apiVersion": "v1", "kind": "List", "items": items}
     with open(a.out, "w") as fh:
