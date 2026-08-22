@@ -58,3 +58,6 @@ monitoring:
 	scp -q -o BatchMode=yes monitoring/monitoring.yaml monitoring/dashboard.yaml robin98@$$ctl:/tmp/; \
 	ssh -o BatchMode=yes robin98@$$ctl "sudo /usr/local/bin/k3s kubectl apply -f /tmp/monitoring.yaml -f /tmp/dashboard.yaml"; \
 	echo "Grafana: http://$$ctl:3000  Prometheus: http://$$ctl:9090"
+
+bringup:
+	@./bringup.sh
