@@ -39,9 +39,17 @@ def parse_manifest(path):
                  "user": None, "hardware": None, "ifaces": {}}
         for sub in el.iter():
             t = strip_ns(sub.tag)
-            if t == "login" and entry["control"] is None:
-                entry["control"] = sub.get("hostname")
-                entry["user"] = sub.get("username")
+            if t == "login":
+                # A manifest carries one login element PER PROJECT MEMBER;
+                # taking the first silently selected whichever teammate the
+                # portal listed first (it picked "aceslab" over the invoking
+                # user on the Emulab run). Prefer the invoking user, fall
+                # back to the first entry.
+                import getpass
+                me = getpass.getuser()
+                if entry["control"] is None or sub.get("username") == me:
+                    entry["control"] = sub.get("hostname")
+                    entry["user"] = sub.get("username")
             elif t == "ip" and sub.get("type") == "ipv4":
                 addr = sub.get("address") or ""
                 lan = LAN_BY_PREFIX.get(addr[:8])
