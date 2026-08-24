@@ -119,12 +119,14 @@ pc.defineParameter(
         ("d6515", "d6515 (Utah): 32c/128GB, 3 expt ifaces"),
         ("d7615", "d7615 (Utah): 32c/192GB NVMe, 3 expt -- only 6 exist"),
         ("c6525-100g", "c6525-100g (Utah): 24c/128GB, 2x100G expt"),
+        ("c6420", "c6420 (Clemson): 32c/384GB -- ONE expt interface (accepted)"),
     ],
-    longDescription="Vetted types only: every entry has >= 2 experimental "
-                    "interfaces (the fe-host requirement). Availability "
-                    "shifts; c6525-25g is the most reliably free. Use "
-                    "hw_type_custom for anything not listed. One homogeneous "
-                    "type per comparison series.")
+    longDescription="Vetted types; all but c6420 have >= 2 experimental "
+                    "interfaces (the fe-host separation). c6420 has one -- "
+                    "control and backend traffic then share it, which we "
+                    "accept. Availability shifts; c6525-25g is the most "
+                    "reliably free. Use hw_type_custom for anything not "
+                    "listed. One homogeneous type per comparison series.")
 pc.defineParameter(
     "hw_type_custom", "Custom hardware type (overrides the list)",
     portal.ParameterType.STRING, "",
