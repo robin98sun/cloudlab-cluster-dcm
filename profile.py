@@ -3,15 +3,21 @@
 Project-neutral: paths, namespace, and labels use the generic name
 "testbed", so the same infrastructure serves any system under test.
 
-Physical hosts (one hardware type per comparison series, default c6525-25g):
+Physical hosts (one hardware type per comparison series, default c6525-25g;
+single shared experiment LAN -- every node needs just one interface):
 
-    ctl1    k3s control plane + monitoring + load generation   client LAN
-    fe<j>   frontend hosts: fe_instances FE+testbed pods each      client+backend
-            (hostNetwork, distinct ports 8081..)                LANs
-    db<k>   storage hosts: 1 replica pod each (+ declared      backend LAN
+    ctl1    k3s control plane + monitoring + load generation
+    fe<j>   frontend hosts: fe_instances FE+testbed pods each
+            (hostNetwork, distinct ports 8081..)
+    db<k>   storage hosts: 1 replica pod each (+ declared
             noisy-neighbor pods later)
-    lg<i>   optional dedicated load-generator hosts; 0 until   client LAN
+    lg<i>   optional dedicated load-generator hosts; 0 until
             stub_lg's late_sends gate says otherwise
+
+All roles share ONE experiment LAN ("expt", 10.10.1.0/24). The earlier
+client/backend split needed two interfaces on fe hosts and excluded
+single-interface types like c6420; the physical admission-bypass isolation
+it provided is gone, and the smoke suite reports that honestly (S06).
 
 Purposes are parameter bindings of this one generator, selected by `preset`:
 
@@ -33,18 +39,18 @@ Placement rules live in cloudlab/gen_manifests.py: FE and DB never share a
 host, DB replicas never share a host, FE pods colocate.
 
 Per-role hardware requirements when substituting hw_type:
-    fe hosts : >= 2 experimental interfaces (client + backend)
+    all      : ONE experimental interface suffices (single shared LAN)
     db hosts : local disk large enough for the data blockstore
     all      : one homogeneous type within any comparison series -- results
                are comparable within a type, never across; S03 warns on
                mixed allocations
 
-Networks: client 10.10.1.0/24, backend 10.10.2.0/24. Monitoring and all k3s
-control traffic ride CloudLab's control network; measured pods use
-hostNetwork, so nothing latency-sensitive crosses an overlay.
+Network: one experiment LAN 10.10.1.0/24. Monitoring and all k3s control
+traffic ride CloudLab's control network; measured pods use hostNetwork, so
+nothing latency-sensitive crosses an overlay.
 
-Address plan: ctl1 10.10.1.10; lg<i> 10.10.1.(10+i); fe<j> 10.10.1.(20+j)
-and 10.10.2.(20+j); db<k> 10.10.2.(30+k).
+Address plan: ctl1 10.10.1.10; lg<i> 10.10.1.(10+i); fe<j> 10.10.1.(20+j);
+db<k> 10.10.1.(30+k).
 """
 
 import geni.portal as portal
@@ -119,20 +125,19 @@ pc.defineParameter(
         ("d6515", "d6515 (Utah): 32c/128GB, 3 expt ifaces"),
         ("d7615", "d7615 (Utah): 32c/192GB NVMe, 3 expt -- only 6 exist"),
         ("c6525-100g", "c6525-100g (Utah): 24c/128GB, 2x100G expt"),
-        ("c6420", "c6420 (Clemson): 32c/384GB -- ONE expt interface (accepted)"),
+        ("c6420", "c6420 (Clemson): 32c/384GB, 1 expt iface"),
     ],
-    longDescription="Vetted types; all but c6420 have >= 2 experimental "
-                    "interfaces (the fe-host separation). c6420 has one -- "
-                    "control and backend traffic then share it, which we "
-                    "accept. Availability shifts; c6525-25g is the most "
-                    "reliably free. Use hw_type_custom for anything not "
+    longDescription="The topology needs only ONE experimental interface per "
+                    "node (single shared LAN), so any listed type maps. "
+                    "Availability shifts; c6525-25g is the most reliably "
+                    "free at Utah. Use hw_type_custom for anything not "
                     "listed. One homogeneous type per comparison series.")
 pc.defineParameter(
     "hw_type_custom", "Custom hardware type (overrides the list)",
     portal.ParameterType.STRING, "",
-    longDescription="Escape hatch for new or unlisted node types. Must have "
-                    ">= 2 experimental interfaces for fe hosts. The smoke "
-                    "suite re-validates any substitution in minutes.")
+    longDescription="Escape hatch for new or unlisted node types. One "
+                    "experimental interface suffices. The smoke suite "
+                    "re-validates any substitution in minutes.")
 pc.defineParameter(
     "disk_image", "Disk image URN", portal.ParameterType.STRING, GOLDEN_IMAGE,
     longDescription="Defaults to the golden image (~15-minute redeploy). Use "
@@ -182,12 +187,17 @@ pc.verifyParameters()
 
 request = pc.makeRequestRSpec()
 
-client_lan = request.LAN("client")
-backend_lan = request.LAN("backend")
+# ONE experiment LAN. The earlier client/backend split required two
+# interfaces on fe hosts, which excluded every single-interface hardware
+# type (c6420 failed mapping with "2 requested, 1 found"). All roles now
+# share one L2 segment; the admission-bypass isolation that the split
+# enforced physically is no longer provided by topology, and the smoke
+# checks say so instead of failing.
+expt_lan = request.LAN("expt")
 if cfg["client_bw"] > 0:
-    client_lan.bandwidth = cfg["client_bw"]
-if cfg["backend_bw"] > 0:
-    backend_lan.bandwidth = cfg["backend_bw"]
+    expt_lan.bandwidth = cfg["client_bw"]
+# backend_bw is retained as an accepted parameter for old bookmarked URLs but
+# is a no-op: there is no second LAN any more.
 
 
 def make_node(name, role, extra_args=""):
@@ -212,20 +222,19 @@ ctl = make_node("ctl1", "ctl",
                 " --fe-hosts %d --db-hosts %d --lg-hosts %d --fe-instances %d"
                 % (cfg["num_fe_hosts"], cfg["num_db_hosts"],
                    cfg["num_lg_hosts"], cfg["fe_instances"]))
-attach(ctl, client_lan, "10.10.1.10")
+attach(ctl, expt_lan, "10.10.1.10")
 
 for i in range(1, cfg["num_lg_hosts"] + 1):
     n = make_node("lg%d" % i, "lg")
-    attach(n, client_lan, "10.10.1.%d" % (10 + i))
+    attach(n, expt_lan, "10.10.1.%d" % (10 + i))
 
 for j in range(1, cfg["num_fe_hosts"] + 1):
     n = make_node("fe%d" % j, "fe")
-    attach(n, client_lan, "10.10.1.%d" % (20 + j))
-    attach(n, backend_lan, "10.10.2.%d" % (20 + j))
+    attach(n, expt_lan, "10.10.1.%d" % (20 + j))
 
 for k in range(1, cfg["num_db_hosts"] + 1):
     n = make_node("db%d" % k, "db")
-    attach(n, backend_lan, "10.10.2.%d" % (30 + k))
+    attach(n, expt_lan, "10.10.1.%d" % (30 + k))
     if cfg["data_size"]:
         bs = n.Blockstore("db%d-data" % k, "/mnt/data")
         bs.size = cfg["data_size"]

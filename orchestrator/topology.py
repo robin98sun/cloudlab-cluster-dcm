@@ -52,7 +52,7 @@ def parse_manifest(path):
         nodes.append(entry)
     if not nodes:
         sys.exit("no ctl/lg/fe/db nodes found in manifest -- wrong file?")
-    return nodes
+    return single_lan_aliases(nodes)
 
 
 def derive_nodes(user, domain, lg, fe, db):
@@ -64,11 +64,25 @@ def derive_nodes(user, domain, lg, fe, db):
         nodes.append(node("lg%d" % i, "lg", {"client": "10.10.1.%d" % (10 + i)}))
     for j in range(1, fe + 1):
         nodes.append(node("fe%d" % j, "fe",
-                          {"client": "10.10.1.%d" % (20 + j),
-                           "backend": "10.10.2.%d" % (20 + j)}))
+                          {"client": "10.10.1.%d" % (20 + j)}))
     for k in range(1, db + 1):
         nodes.append(node("db%d" % k, "db",
-                          {"backend": "10.10.2.%d" % (30 + k)}))
+                          {"backend": "10.10.1.%d" % (30 + k)}))
+    return single_lan_aliases(nodes)
+
+
+def single_lan_aliases(nodes):
+    """On the single-LAN topology every address is 10.10.1.x, so manifest
+    parsing labels them all "client". Downstream code asks fe nodes for
+    their client address and db nodes for their backend address -- both are
+    now the same wire, so alias rather than fail. Two-LAN manifests are
+    untouched: nodes that already carry both labels keep them."""
+    for n in nodes:
+        ifaces = n["ifaces"]
+        if "backend" not in ifaces and "client" in ifaces:
+            ifaces["backend"] = ifaces["client"]
+        elif "client" not in ifaces and "backend" in ifaces:
+            ifaces["client"] = ifaces["backend"]
     return nodes
 
 
@@ -92,7 +106,7 @@ def build(nodes, fe_instances, fe_base_port, db_port):
             })
     return {"nodes": nodes, "frontends": frontends,
             "destinations": destinations,
-            "lans": {"client": "10.10.1.0/24", "backend": "10.10.2.0/24"}}
+            "lans": {"expt": "10.10.1.0/24"}}
 
 
 def main():

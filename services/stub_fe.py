@@ -37,13 +37,16 @@ def discover_destinations():
         with open(cfg) as fh:
             return json.load(fh)["destinations"]
     found = []
-    for k in range(1, 10):
-        host = "10.10.2.%d" % (30 + k)
+    # fallback probe covers both address plans: the current single-LAN
+    # 10.10.1.3x and the legacy two-LAN 10.10.2.3x
+    candidates = ["10.10.1.%d" % (30 + k) for k in range(1, 10)] + \
+                 ["10.10.2.%d" % (30 + k) for k in range(1, 10)]
+    for host in candidates:
         try:
             with urlopen("http://%s:%d/health" % (host, ARGS.db_port),
                          timeout=1.0) as r:
                 if r.status == 200:
-                    found.append({"destination_id": "db%d" % k,
+                    found.append({"destination_id": "db%s" % host.rsplit(".", 1)[1][-1],
                                   "endpoint": "http://%s:%d" % (host, ARGS.db_port)})
         except (URLError, OSError):
             continue

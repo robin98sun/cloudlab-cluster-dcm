@@ -202,6 +202,14 @@ def s06(ctx):
     dbs = ctx.by_role("db")
     if not dbs:
         return SKIP, "no db hosts"
+    # Single-LAN topology: client and backend are the same wire, so there is
+    # no physical admission-bypass isolation to verify. Say so instead of
+    # failing -- pretending the old two-LAN guarantee still held would be
+    # worse than not having it.
+    if all(db["ifaces"].get("backend") == db["ifaces"].get("client")
+           for db in dbs):
+        return SKIP, ("single-LAN topology: no separate backend LAN; "
+                      "admission bypass is NOT physically prevented")
     leaks = []
     for drv in ctx.drivers() + ctx.by_role("ctl"):
         for db in dbs:

@@ -129,30 +129,31 @@ print(json.dumps({
 }, indent=2))
 PYFACTS
 
-# CloudLab installs static inter-LAN routes (via multi-homed nodes) by
-# default. That lets non-fe hosts reach LANs they have no interface on --
-# exactly the admission bypass S06 forbids. Scrub them.
+# CloudLab installs static inter-LAN routes (via multi-homed nodes) when a
+# topology has several LANs. The current topology is a SINGLE shared LAN, so
+# there is normally nothing to scrub -- but the deletions stay for two-LAN
+# manifests from older bookmarks, guarded so a host NEVER deletes a route
+# for a subnet it has an interface on (that once cut db1 off from its own
+# LAN, caught by S05).
+has_addr_in() { ip -o -4 addr show | awk '$4 ~ /^'"$1"'\./ {found=1} END {exit !found}'; }
 case "$ROLE" in
-    ctl|lg)
-        # Emulab's blanket 10.0.0.0/8 route (via the multi-homed fe host)
-        # is the actual bypass; the /24 is belt-and-suspenders. NEVER touch
-        # a subnet the host has an interface on.
-        $SUDO ip route del 10.0.0.0/8 2>/dev/null || true
-        $SUDO ip route del 10.10.2.0/24 2>/dev/null || true
-        ;;
-    db)
-        $SUDO ip route del 10.0.0.0/8 2>/dev/null || true
-        $SUDO ip route del 10.10.1.0/24 2>/dev/null || true
+    ctl|lg|db)
+        has_addr_in "10\.10\.1" || $SUDO ip route del 10.10.1.0/24 2>/dev/null || true
+        has_addr_in "10\.10\.2" || {
+            $SUDO ip route del 10.0.0.0/8 2>/dev/null || true
+            $SUDO ip route del 10.10.2.0/24 2>/dev/null || true
+        }
         ;;
     fe)
-        # k3s needs ip_forward=1, so fe could still route client->backend
-        # for anyone with a stale route. Refuse to forward between the two
-        # experiment NICs (flannel/pod traffic is unaffected).
-        CI=$(ip -o -4 addr show | awk '$4 ~ /^10\.10\.1\./ {print $2}')
-        BI=$(ip -o -4 addr show | awk '$4 ~ /^10\.10\.2\./ {print $2}')
-        if [ -n "$CI" ] && [ -n "$BI" ]; then
-            $SUDO iptables -C FORWARD -i "$CI" -o "$BI" -j DROP 2>/dev/null ||                 $SUDO iptables -I FORWARD -i "$CI" -o "$BI" -j DROP
-            $SUDO iptables -C FORWARD -i "$BI" -o "$CI" -j DROP 2>/dev/null ||                 $SUDO iptables -I FORWARD -i "$BI" -o "$CI" -j DROP
+        # Two-LAN legacy only: refuse to forward between distinct experiment
+        # NICs. On the single-LAN topology BI is empty and nothing happens.
+        CI=$(ip -o -4 addr show | awk '$4 ~ /^10\.10\.1\./ {print $2; exit}')
+        BI=$(ip -o -4 addr show | awk '$4 ~ /^10\.10\.2\./ {print $2; exit}')
+        if [ -n "$CI" ] && [ -n "$BI" ] && [ "$CI" != "$BI" ]; then
+            $SUDO iptables -C FORWARD -i "$CI" -o "$BI" -j DROP 2>/dev/null || \
+                $SUDO iptables -I FORWARD -i "$CI" -o "$BI" -j DROP
+            $SUDO iptables -C FORWARD -i "$BI" -o "$CI" -j DROP 2>/dev/null || \
+                $SUDO iptables -I FORWARD -i "$BI" -o "$CI" -j DROP
         fi
         ;;
 esac
