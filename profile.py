@@ -31,7 +31,11 @@ Purposes are parameter bindings of this one generator, selected by `preset`:
 
 When preset != custom, the preset's bindings OVERRIDE the individual form
 fields they name; fields a preset does not name (notably disk_image) still
-come from the form. After baking a golden image, pin its versioned URN as
+come from the form. Hardware type is the ONE exception: an explicit pick in
+hw_type, or anything in hw_type_custom, outranks the preset, because
+availability changes hour to hour and a preset must never pin a user to a
+type that cannot map. hw_type defaults to "" (unset) so that "chose
+c6525-25g" is distinguishable from "left it alone". After baking a golden image, pin its versioned URN as
 the disk_image default here and commit; before tagging a submission release,
 also pin it inside the submission preset.
 
@@ -62,6 +66,12 @@ BASE_IMAGE = "urn:publicid:IDN+emulab.net+image+emulab-ops//UBUNTU22-64-STD"
 # the submission preset before tagging a release). Rebuild from BASE_IMAGE
 # by passing it as disk_image if the golden image is ever broken.
 GOLDEN_IMAGE = "urn:publicid:IDN+utah.cloudlab.us+image+aces-project-01-PG0:DCM-dev.db1"
+
+# Used when neither the form nor the preset names a type. The dropdown's
+# default is "" (unset) rather than this value, so that an explicit pick can
+# be told apart from an untouched field -- that distinction is what lets a
+# selection override a preset.
+DEFAULT_HW = "c6525-25g"
 
 PRESETS = {
     "smoke": dict(num_fe_hosts=1, num_db_hosts=1, num_lg_hosts=0,
@@ -118,8 +128,9 @@ pc.defineParameter(
                     "distributed property: several independent "
                     "admission points enforcing one shared budget.")
 pc.defineParameter(
-    "hw_type", "Hardware type", portal.ParameterType.STRING, "c6525-25g",
+    "hw_type", "Hardware type", portal.ParameterType.STRING, "",
     legalValues=[
+        ("", "preset default (c6525-25g) -- leave to let the preset decide"),
         ("c6525-25g", "c6525-25g (Utah): 16c/128GB, 2x25G expt -- usually free"),
         ("c6620", "c6620 (Utah): 28c/128GB NVMe, 2 expt -- often reserved"),
         ("d6515", "d6515 (Utah): 32c/128GB, 3 expt ifaces"),
@@ -129,15 +140,20 @@ pc.defineParameter(
     ],
     longDescription="The topology needs only ONE experimental interface per "
                     "node (single shared LAN), so any listed type maps. "
-                    "Availability shifts; c6525-25g is the most reliably "
-                    "free at Utah. Use hw_type_custom for anything not "
+                    "An explicit pick here OVERRIDES the preset's type. "
+                    "Availability shifts and is per-type: the measurement "
+                    "preset asks for 8 machines, and c6525-25g has repeatedly "
+                    "had only ~4 free, which fails mapping outright -- check "
+                    "the cluster status page for a type with 8 free before "
+                    "instantiating. Use hw_type_custom for anything not "
                     "listed. One homogeneous type per comparison series.")
 pc.defineParameter(
     "hw_type_custom", "Custom hardware type (overrides the list)",
     portal.ParameterType.STRING, "",
-    longDescription="Escape hatch for new or unlisted node types. One "
-                    "experimental interface suffices. The smoke suite "
-                    "re-validates any substitution in minutes.")
+    longDescription="Escape hatch for new or unlisted node types; it beats "
+                    "both the dropdown and the preset. One experimental "
+                    "interface suffices. The smoke suite re-validates any "
+                    "substitution in minutes.")
 pc.defineParameter(
     "disk_image", "Disk image URN", portal.ParameterType.STRING, GOLDEN_IMAGE,
     longDescription="Defaults to the golden image (~15-minute redeploy). Use "
@@ -161,14 +177,24 @@ CONFIG_FIELDS = ("num_fe_hosts", "num_db_hosts", "num_lg_hosts",
                  "fe_instances", "hw_type", "disk_image", "data_size",
                  "client_bw", "backend_bw")
 cfg = {f: getattr(params, f) for f in CONFIG_FIELDS}
-if params.hw_type_custom.strip():
-    cfg["hw_type"] = params.hw_type_custom.strip()
 if params.preset != "custom":
     if params.preset not in PRESETS:
         pc.reportError(portal.ParameterError(
             "unknown preset %r" % params.preset, ["preset"]))
     else:
         cfg.update(PRESETS[params.preset])
+
+# Explicit hardware intent outranks the preset, and must be applied AFTER it.
+# Until 2026-08-25 this ran BEFORE the preset update, so measurement and
+# submission -- the only presets that name a type -- silently forced
+# c6525-25g no matter what the form said, including hw_type_custom. The
+# symptom was a mapping failure blaming a type the user had not chosen.
+if params.hw_type.strip():
+    cfg["hw_type"] = params.hw_type.strip()
+if params.hw_type_custom.strip():
+    cfg["hw_type"] = params.hw_type_custom.strip()
+if not cfg["hw_type"]:
+    cfg["hw_type"] = DEFAULT_HW
 
 if cfg["num_fe_hosts"] < 1:
     pc.reportError(portal.ParameterError(
