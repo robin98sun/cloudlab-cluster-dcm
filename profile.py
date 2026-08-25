@@ -77,7 +77,7 @@ PRESETS = {
     "smoke": dict(num_fe_hosts=1, num_db_hosts=1, num_lg_hosts=0,
                   fe_instances=3, data_size="20GB"),
     "full": dict(num_fe_hosts=1, num_db_hosts=3, num_lg_hosts=0,
-                 fe_instances=3, data_size="200GB"),
+                 fe_instances=3, data_size="600GB"),
     # measurement-v1: the measurement-valid topology (8 machines).
     # 3 independent FE hosts (1 controller instance each = independent
     # failure domains and resources), dedicated load generator, monitor/
@@ -85,11 +85,11 @@ PRESETS = {
     # when the validity gates in the runbook also pass.
     "measurement": dict(num_fe_hosts=3, num_db_hosts=3, num_lg_hosts=1,
                         fe_instances=1, hw_type="c6525-25g",
-                        data_size="200GB", client_bw=0, backend_bw=0),
+                        data_size="600GB", client_bw=0, backend_bw=0),
     # Freeze everything that defines the reported configuration. Pin
     # disk_image here too once the submission-era golden image exists.
     "submission": dict(num_fe_hosts=3, num_db_hosts=3, num_lg_hosts=1,
-                       fe_instances=1, hw_type="c6525-25g", data_size="200GB",
+                       fe_instances=1, hw_type="c6525-25g", data_size="600GB",
                        client_bw=0, backend_bw=0),
 }
 
@@ -161,9 +161,19 @@ pc.defineParameter(
                     "scratch. Not overridden by presets.")
 pc.defineParameter(
     "data_size", "Data blockstore per storage host",
-    portal.ParameterType.STRING, "20GB",
-    longDescription="Mounted at /mnt/data. Empty skips it (data lands on the "
-                    "root filesystem -- smoke only).")
+    portal.ParameterType.STRING, "600GB",
+    longDescription="Mounted at /mnt/data. This does NOT gate access to the "
+                    "hardware -- the node is yours and every physical disk is "
+                    "present and writable as a raw device either way. What it "
+                    "gates is what CloudLab automatically carves, formats and "
+                    "mounts for you; unrequested space simply stays "
+                    "unpartitioned. Sized past RAM (128GB on c6525-25g) so a "
+                    "working set can exceed the page cache, which the "
+                    "cache-failure scenario needs. Checked at MAPPING time "
+                    "against free space on the node's spare disks: if "
+                    "instantiation fails complaining about space, lower it. "
+                    "Empty skips the blockstore (data lands on /local -- "
+                    "smoke only).")
 pc.defineParameter(
     "client_bw", "Client link bandwidth (Kbps, 0 = native)",
     portal.ParameterType.INTEGER, 0)

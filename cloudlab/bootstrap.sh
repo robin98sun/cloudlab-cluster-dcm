@@ -112,6 +112,38 @@ def cmd(*a):
         return subprocess.run(a, capture_output=True, text=True).stdout.strip()
     except OSError:
         return ""
+
+def disk_facts(path):
+    """Name the physical device behind path, and every disk that exists.
+
+    Write capacity in this system is fsync-bound, so a capacity number is
+    only meaningful next to the device that produced it -- a SATA SSD and an
+    NVMe differ by an order of magnitude on exactly this operation. Recording
+    it here means a result bundle can never be ambiguous about what was
+    measured, and makes an idle fast disk visible instead of silently unused.
+    """
+    src = cmd("findmnt", "-no", "SOURCE", "--target", path)
+    base = cmd("lsblk", "-no", "PKNAME", src) if src.startswith("/dev/") else ""
+    base = base.splitlines()[0].strip() if base else ""
+    if not base and src.startswith("/dev/"):
+        base = os.path.basename(src).rstrip("0123456789")
+    def dev(field):
+        return read("/sys/block/%s/%s" % (base, field)) if base else ""
+    # -d already restricts to whole disks, so every non-empty line is one.
+    disks = [l.strip() for l in
+             cmd("lsblk", "-dn", "-o", "NAME,SIZE,ROTA,MODEL").splitlines()
+             if l.strip()]
+    return {
+        "mount_source": src,
+        "device": base,
+        "rotational": dev("queue/rotational"),
+        "scheduler": dev("queue/scheduler"),
+        "model": dev("device/model") or dev("device/device/model"),
+        "size_bytes": (int(dev("size")) * 512) if dev("size").isdigit() else 0,
+        "free": (cmd("df", "-h", "--output=size,avail,pcent", path)
+                 .splitlines() or [""])[-1].strip(),
+        "all_disks": disks,
+    }
 print(json.dumps({
     "role": role,
     "hostname": socket.gethostname(),
@@ -119,6 +151,7 @@ print(json.dumps({
     "interfaces": ifaces,
     "data_dir": data_dir,
     "data_backing": data_backing,
+    "storage": disk_facts(data_dir),
     "telemetry_dir": telem_dir,
     "cpus": os.cpu_count(),
     "kernel": os.uname().release,
