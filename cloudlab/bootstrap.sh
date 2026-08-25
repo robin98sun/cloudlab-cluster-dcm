@@ -26,7 +26,14 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-IMAGE_LAYER=1          # bump when the bake layer's contents change, then rebake
+IMAGE_LAYER=2          # bump when the bake layer's contents change, then rebake
+# Toolchain versions baked into the image. These MUST match storaged/build.sh
+# in the dynamic-capacity-model repo: that script skips its own install when
+# it finds exactly these, so a match saves ~6 minutes per node on every fresh
+# image and a mismatch costs that time silently. facts.json records what is
+# actually present so the drift is visible rather than merely slow.
+GO_VER=1.25.0
+ROCKS_VER=9.2.1
 DB_PORT=9091
 # Private testbed on CloudLab's control network; static token keeps cluster
 # formation dependency-free. Not a pattern for anything internet-facing.
@@ -73,6 +80,35 @@ else
         >/dev/null 2>&1 \
         || echo "WARN: image prefetch failed; pods will pull from the registry"
 
+    # storaged is a cgo binary against RocksDB, so a node without these pays
+    # a ~6 minute source build before it can run anything at all. Baking them
+    # is the difference between a re-image costing minutes and costing an
+    # hour across eight nodes.
+    if ! /usr/local/go/bin/go version 2>/dev/null | grep -q "go$GO_VER"; then
+        echo "baking go $GO_VER"
+        curl -sfL "https://go.dev/dl/go${GO_VER}.linux-amd64.tar.gz" -o /tmp/go.tgz
+        $SUDO rm -rf /usr/local/go && $SUDO tar -C /usr/local -xzf /tmp/go.tgz
+        rm -f /tmp/go.tgz
+    fi
+    $SUDO apt-get install -y -qq build-essential git libgflags-dev \
+        libsnappy-dev zlib1g-dev libbz2-dev liblz4-dev libzstd-dev >/dev/null
+    if [ ! -f "/usr/local/lib/librocksdb.so.$ROCKS_VER" ]; then
+        echo "baking rocksdb $ROCKS_VER from source (~5-8 min, once per image)"
+        rm -rf /tmp/rocksdb
+        if git clone -q --depth 1 -b "v$ROCKS_VER" \
+               https://github.com/facebook/rocksdb.git /tmp/rocksdb &&
+           make -C /tmp/rocksdb shared_lib -j"$(nproc)" \
+               DISABLE_WARNING_AS_ERROR=1 >/dev/null 2>&1 &&
+           $SUDO make -C /tmp/rocksdb install-shared PREFIX=/usr/local >/dev/null; then
+            $SUDO ldconfig
+        else
+            # Not fatal: build.sh rebuilds on the node. A node that boots
+            # slowly beats a node that fails to boot.
+            echo "WARN: rocksdb bake failed; storaged will build it per node"
+        fi
+        rm -rf /tmp/rocksdb
+    fi
+
     echo "$IMAGE_LAYER" | $SUDO tee /etc/testbed-image-version >/dev/null
 fi
 
@@ -93,7 +129,7 @@ else
 fi
 
 python3 - "$ROLE" "$DATA_DIR" "$DATA_BACKING" "$STATE/telemetry" <<'PYFACTS' | $SUDO tee "$STATE/facts.json" >/dev/null
-import json, os, socket, subprocess, sys
+import glob, json, os, socket, subprocess, sys
 role, data_dir, data_backing, telem_dir = sys.argv[1:5]
 ifaces = {}
 out = subprocess.run(["ip", "-o", "-4", "addr", "show"],
@@ -157,6 +193,18 @@ print(json.dumps({
     "kernel": os.uname().release,
     "product": read("/sys/class/dmi/id/product_name"),
     "image_layer": read("/etc/testbed-image-version"),
+    # Recorded because a version mismatch with storaged/build.sh is invisible
+    # otherwise: the node still works, it just rebuilds the toolchain and the
+    # bake stops paying for itself.
+    "go_version": (cmd("/usr/local/go/bin/go", "version").split(" ")[2]
+                   if os.path.exists("/usr/local/go/bin/go") else ""),
+    # /usr/local/lib holds librocksdb.so.9, .so.9.2 and .so.9.2.1 -- the
+    # first two are SONAME symlinks, so take the most specific one or the
+    # recorded version is a useless "9".
+    "rocksdb_version": max([f.split(".so.")[1] for f in
+                            glob.glob("/usr/local/lib/librocksdb.so.*")
+                            if ".so." in f] or [""],
+                           key=lambda v: (v.count("."), len(v))),
     "k3s_version": cmd("/usr/local/bin/k3s", "--version").splitlines()[0]
                    if os.path.exists("/usr/local/bin/k3s") else "",
 }, indent=2))
