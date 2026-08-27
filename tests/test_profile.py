@@ -97,3 +97,30 @@ class PresetPrecedence(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class SingleCluster(unittest.TestCase):
+    """One LAN means one CloudLab cluster.
+
+    An experiment can span aggregates, but the LAN between them is a stitched
+    wide-area link: tens of milliseconds RTT against ~0.1 ms locally. Raft
+    would pay that on every commit and the fsync-bound write capacity this
+    project measures would be replaced by a network-bound one.
+    """
+
+    def test_types_from_one_cluster_are_accepted(self):
+        nodes, _ = request_for({"preset": "measurement-het"})   # both Clemson
+        self.assertEqual(nodes["db1"]["hw"], "r6615")
+        self.assertEqual(nodes["fe1"]["hw"], "c6420")
+
+    def test_types_split_across_clusters_are_refused(self):
+        with self.assertRaises(AssertionError) as e:
+            request_for({"preset": "measurement-het", "hw_type": "c6420",
+                         "storage_hw_type": "c6525-25g"})
+        self.assertIn("different CloudLab clusters", str(e.exception))
+
+    def test_an_unknown_type_is_not_assumed_remote(self):
+        # a new hardware type is new, not necessarily elsewhere
+        nodes, _ = request_for({"preset": "measurement-het",
+                                "storage_hw_type_custom": "brand-new-type"})
+        self.assertEqual(nodes["db1"]["hw"], "brand-new-type")

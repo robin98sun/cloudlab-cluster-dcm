@@ -89,6 +89,20 @@ DEFAULT_HW = "c6525-25g"
 # queueing for a reservation.
 STORAGE_HW_DEFAULT = ""      # "" means: use the cluster-wide hw_type
 
+# Which CloudLab cluster each hardware type lives in. A single experiment can
+# in principle span aggregates, but a LAN between them is a STITCHED
+# wide-area link: tens of milliseconds of round trip against ~0.1 ms on a
+# local LAN. Raft would then pay WAN latency on every commit and the
+# fsync-bound write capacity this project measures would be replaced by a
+# network-bound one -- so mixing types across clusters is refused here rather
+# than left to fail at mapping time or, worse, succeed and mislead.
+HW_CLUSTER = {
+    "c6525-25g": "utah", "c6620": "utah", "d6515": "utah",
+    "d7615": "utah", "c6525-100g": "utah",
+    "c6420": "clemson", "c6320": "clemson", "r6615": "clemson",
+    "r650": "clemson",
+}
+
 PRESETS = {
     "smoke": dict(num_fe_hosts=1, num_db_hosts=1, num_lg_hosts=0,
                   fe_instances=3, data_size="20GB"),
@@ -256,6 +270,21 @@ if params.storage_hw_type_custom.strip():
     cfg["storage_hw_type"] = params.storage_hw_type_custom.strip()
 if not cfg.get("storage_hw_type"):
     cfg["storage_hw_type"] = cfg["hw_type"]
+
+# Both types must live in the SAME cluster. Types we do not recognise are
+# left alone: an unknown type is a new one, not necessarily a remote one.
+_c1 = HW_CLUSTER.get(cfg["hw_type"])
+_c2 = HW_CLUSTER.get(cfg["storage_hw_type"])
+if _c1 and _c2 and _c1 != _c2:
+    pc.reportError(portal.ParameterError(
+        "hardware types are in different CloudLab clusters: %s is at %s and "
+        "%s is at %s. One experiment CAN span aggregates, but the LAN between "
+        "them becomes a stitched wide-area link -- tens of milliseconds RTT "
+        "against ~0.1ms locally -- so every raft commit would pay WAN latency "
+        "and the write capacity measured would be the network's, not the "
+        "storage engine's. Pick both types from one cluster."
+        % (cfg["hw_type"], _c1, cfg["storage_hw_type"], _c2),
+        ["hw_type", "storage_hw_type"]))
 
 if cfg["num_fe_hosts"] < 1:
     pc.reportError(portal.ParameterError(
