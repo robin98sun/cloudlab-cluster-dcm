@@ -189,8 +189,45 @@ class HardwareFacts(unittest.TestCase):
         src = self._profile()
         # the trap: c6320 has 28 cores of 2014 Haswell at 2.0GHz
         self.assertIn("E5-2683v3", src)
-        self.assertIn("OLDEST cores", src)
+        self.assertIn("oldest cores", src)
         self.assertIn("9354P", src)
+
+
+class Availability(unittest.TestCase):
+    """What maps is a harder constraint than what is fast.
+
+    Observed 2026-08-27 at Clemson: c6320 16 free, everything else 0-3, and
+    EVERY free type is HDD-only. A preset naming r6615 and r7525 is
+    aspirational there, not runnable.
+    """
+
+    def test_the_available_preset_maps_to_one_plentiful_type(self):
+        nodes, lans = request_for({"preset": "clemson-available"})
+        self.assertEqual({v["hw"] for v in nodes.values()}, {"c6320"})
+        self.assertEqual(len(lans), 1)
+
+    def test_flash_requirement_refuses_a_spindle_storage_type(self):
+        with self.assertRaises(AssertionError) as e:
+            request_for({"preset": "clemson-available",
+                         "require_flash_storage": True})
+        # request_for keeps only the last 400 chars of stderr, so assert on
+        # wording that survives the trim
+        self.assertIn("every currently-free type is HDD-only", str(e.exception))
+
+    def test_flash_requirement_accepts_a_flash_storage_type(self):
+        nodes, _ = request_for({"preset": "measurement",
+                                "require_flash_storage": True})
+        self.assertEqual(nodes["db1"]["hw"], "c6525-25g")   # SATA SSD
+
+    def test_disk_class_is_recorded_for_every_listed_type(self):
+        src = open(os.path.join(ROOT, "profile.py")).read()
+        self.assertIn("HW_DISK", src)
+        # the free-at-Clemson types are all spindles, and saying so is the
+        # point of the table
+        for t in ("c6320", "c8220", "c8220x", "c4130", "ibm8335"):
+            self.assertIn('"%s": "hdd"' % t, src, t)
+        for t in ("r6615", "c6620", "d7615", "c6525-100g", "r650"):
+            self.assertIn('"%s": "nvme"' % t, src, t)
 
 
 if __name__ == "__main__":

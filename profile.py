@@ -109,10 +109,22 @@ HW_CLUSTER = {
 # generation rather than with core count -- measured at ~2500 qps per pacer
 # on 2.6GHz Skylake. A 28-core 2014 Haswell at 2.0GHz is the worst choice
 # for that role despite looking respectable on a core count.
+# Disk class per type -- the property that sets write capacity. Measured:
+# 19.5 write qps on 7200RPM spindles against ~3,500 on SATA SSD, same code,
+# more cores (doc 11). "hdd" here is not a detail, it is the ceiling.
+HW_DISK = {
+    "c6525-25g": "ssd", "c6620": "nvme", "d6515": "ssd", "d7615": "nvme",
+    "c6525-100g": "nvme",
+    "c6420": "hdd", "c6320": "hdd", "r7525": "hdd", "r650": "nvme",
+    "r6615": "nvme", "c8220": "hdd", "c8220x": "hdd", "c4130": "hdd",
+    "ibm8335": "hdd",
+}
+
 HW_GHZ = {
     "c6525-25g": 3.00, "c6620": 2.1, "d6515": 2.35, "d7615": 3.25,
     "c6525-100g": 2.80, "c6420": 2.6, "c6320": 2.0, "r7525": 2.9,
-    "r650": 2.4, "r6615": 3.25,
+    "r650": 2.4, "r6615": 3.25, "c8220": 2.2, "c8220x": 2.2,
+    "c4130": 2.5, "ibm8335": 2.86,
 }
 
 PRESETS = {
@@ -131,9 +143,19 @@ PRESETS = {
     # Heterogeneous: flash under the replicas, commodity everywhere else.
     # Only THREE machines of the scarce type are requested, which is what
     # makes this mappable when the fast pool is nearly full.
+    # Clemson today: c6320 is usually the ONLY type with free nodes, and
+    # every free Clemson type is HDD-only. This preset is what actually
+    # maps there -- good for read-side and overload work, spindle-bound for
+    # writes, and honest about which.
+    "clemson-available": dict(num_fe_hosts=3, num_db_hosts=3, num_lg_hosts=1,
+                              fe_instances=1, hw_type="c6320",
+                              storage_hw_type="c6320", load_hw_type="c6320",
+                              ctl_hw_type="c6320", data_size="600GB",
+                              client_bw=0, backend_bw=0),
     # Storage on the NVMe machine with the fastest cores; load generation on
     # the machine with the most fast cores, since the pacer is single-thread
-    # bound; the observer on whatever is plentiful.
+    # bound; the observer on whatever is plentiful. ASPIRATIONAL at Clemson:
+    # r6615 and r7525 are routinely at zero free.
     "measurement-het": dict(num_fe_hosts=3, num_db_hosts=3, num_lg_hosts=1,
                             fe_instances=1, hw_type="c6420",
                             storage_hw_type="r6615", load_hw_type="r7525",
@@ -153,8 +175,11 @@ pc.defineParameter(
     legalValues=[("smoke", "smoke: 3 machines, 1 db host (plumbing-valid)"),
                  ("full", "full: 5 machines, 3 db hosts (plumbing-valid)"),
                  ("measurement", "measurement: 8 machines, 3 FE hosts, dedicated LG"),
-                 ("measurement-het", "measurement-het: same 8, but only the 3 "
-                  "storage hosts use the scarce fast type"),
+                 ("measurement-het", "measurement-het: 3 NVMe storage + fast "
+                  "load drivers (Clemson: often unmappable, check free counts)"),
+                 ("clemson-available", "clemson-available: all c6320 -- what "
+                  "actually maps at Clemson today; HDD, so writes are "
+                  "spindle-bound"),
                  ("submission", "submission: frozen measurement-scale bindings"),
                  ("custom", "custom: use the individual fields below")],
     longDescription="Anything other than 'custom' overrides the individual "
@@ -198,7 +223,8 @@ pc.defineParameter(
         ("d7615", "Utah d7615: AMD 9354P 32c @3.25GHz '25, 192GB, NVMe -- only 6"),
         ("c6525-100g", "Utah c6525-100g: AMD 7402P 24c @2.80GHz '22, 128GB, NVMe"),
         ("c6420", "Clemson c6420: 2x Xeon Gold 6142 32c @2.6GHz '17, 384GB, HDD -- plentiful"),
-        ("c6320", "Clemson c6320: 2x E5-2683v3 28c @2.0GHz '14, 256GB, HDD -- OLDEST cores"),
+        ("c6320", "Clemson c6320: 2x E5-2683v3 28c @2.0GHz '14, 256GB, HDD -- oldest cores, but usually the ONLY Clemson type free"),
+        ("c8220", "Clemson c8220: 2x E5-2660v2 20c @2.2GHz '13, 256GB, HDD"),
         ("r7525", "Clemson r7525: 2x AMD 7542 64c @2.9GHz '20, 512GB, HDD -- best load driver"),
         ("r650", "Clemson r650: 2x Xeon Plat 8360Y 72c @2.4GHz, 256GB, SSD+NVMe"),
         ("r6615", "Clemson r6615: AMD 9354P 32c @3.25GHz '25, 192GB, 2x NVMe -- BEST storage"),
@@ -212,6 +238,16 @@ pc.defineParameter(
                     "the cluster status page for a type with 8 free before "
                     "instantiating. Use hw_type_custom for anything not "
                     "listed. One homogeneous type per comparison series.")
+pc.defineParameter(
+    "require_flash_storage", "Refuse to build if the storage hardware has no flash",
+    portal.ParameterType.BOOLEAN, False,
+    longDescription="Write capacity is fsync-bound: 19.5 qps measured on "
+                    "7200RPM spindles against ~3,500 on SATA SSD, same code "
+                    "and MORE cores. Set this for a write or overload "
+                    "campaign so a spindle-backed cluster is refused at "
+                    "instantiation rather than discovered after an hour of "
+                    "measurement. Leave it off for read-side work, where "
+                    "HDD nodes are perfectly good and far easier to get.")
 pc.defineParameter(
     "load_hw_type", "Load-driver hardware type (lg + fe hosts; empty = same as the rest)",
     portal.ParameterType.STRING, "",
@@ -325,6 +361,19 @@ for _f in ("hw_type", "storage_hw_type", "load_hw_type", "ctl_hw_type"):
     _cl = HW_CLUSTER.get(cfg[_f])
     if _cl:
         _seen.setdefault(_cl, []).append("%s=%s" % (_f, cfg[_f]))
+_sdisk = HW_DISK.get(cfg["storage_hw_type"])
+if params.require_flash_storage and _sdisk == "hdd":
+    pc.reportError(portal.ParameterError(
+        "storage hardware %s has 7200RPM spindles, and you asked for flash. "
+        "Write capacity is fsync-bound: 19.5 qps measured on this class of "
+        "disk against ~3,500 on SATA SSD, on identical code with more cores. "
+        "At Clemson every currently-free type is HDD-only (c6320, c8220, "
+        "c8220x, c4130, ibm8335); the flash types there -- r6615, r650, "
+        "r7525, c6420 -- are usually at zero. Utah's c6525-25g (SATA SSD) is "
+        "the reliable flash option. Unset this parameter to build an "
+        "HDD cluster deliberately, which is the right choice for read-side "
+        "and overload work." % cfg["storage_hw_type"],
+        ["storage_hw_type", "require_flash_storage"]))
 if len(_seen) > 1:
     pc.reportError(portal.ParameterError(
         "hardware types span %d CloudLab clusters (%s). One experiment CAN "
