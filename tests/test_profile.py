@@ -172,62 +172,38 @@ class PerGroupHardware(unittest.TestCase):
         self.assertIn("Pick every type from one cluster", str(e.exception))
 
 
-class HardwareFacts(unittest.TestCase):
-    """Core count is not speed. From CloudLab's own hardware page."""
-
-    def _profile(self):
-        return open(os.path.join(ROOT, "profile.py")).read()
-
-    def test_clock_speeds_are_recorded(self):
-        src = self._profile()
-        self.assertIn("HW_GHZ", src)
-        for t, ghz in (("c6320", "2.0"), ("c6420", "2.6"),
-                       ("r7525", "2.9"), ("r6615", "3.25")):
-            self.assertIn('"%s": %s' % (t, ghz), src, t)
-
-    def test_labels_state_cpu_and_era_not_only_cores(self):
-        src = self._profile()
-        # the trap: c6320 has 28 cores of 2014 Haswell at 2.0GHz
-        self.assertIn("E5-2683v3", src)
-        self.assertIn("oldest cores", src)
-        self.assertIn("9354P", src)
 
 
-class Availability(unittest.TestCase):
-    """What maps is a harder constraint than what is fast.
+class CustomTypes(unittest.TestCase):
+    """Every group takes a custom type, so an unlisted one is never a blocker."""
 
-    Observed 2026-08-27 at Clemson: c6320 16 free, everything else 0-3, and
-    EVERY free type is HDD-only. A preset naming r6615 and r7525 is
-    aspirational there, not runnable.
-    """
+    def test_each_group_accepts_a_custom_type(self):
+        nodes, _ = request_for({"preset": "custom", "hw_type": "c6420",
+                                "storage_hw_type_custom": "storage-x",
+                                "load_hw_type_custom": "load-x",
+                                "ctl_hw_type_custom": "ctl-x",
+                                "num_db_hosts": 3, "num_fe_hosts": 1,
+                                "num_lg_hosts": 1})
+        self.assertEqual(nodes["db1"]["hw"], "storage-x")
+        self.assertEqual(nodes["fe1"]["hw"], "load-x")
+        self.assertEqual(nodes["lg1"]["hw"], "load-x")
+        self.assertEqual(nodes["ctl1"]["hw"], "ctl-x")
 
-    def test_the_available_preset_maps_to_one_plentiful_type(self):
-        nodes, lans = request_for({"preset": "clemson-available"})
-        self.assertEqual({v["hw"] for v in nodes.values()}, {"c6320"})
-        self.assertEqual(len(lans), 1)
+    def test_a_custom_type_beats_the_dropdown(self):
+        nodes, _ = request_for({"preset": "custom", "hw_type": "c6420",
+                                "storage_hw_type": "c6320",
+                                "storage_hw_type_custom": "xl170",
+                                "num_db_hosts": 3, "num_fe_hosts": 1})
+        self.assertEqual(nodes["db1"]["hw"], "xl170")
 
-    def test_flash_requirement_refuses_a_spindle_storage_type(self):
-        with self.assertRaises(AssertionError) as e:
-            request_for({"preset": "clemson-available",
-                         "require_flash_storage": True})
-        # request_for keeps only the last 400 chars of stderr, so assert on
-        # wording that survives the trim
-        self.assertIn("every currently-free type is HDD-only", str(e.exception))
-
-    def test_flash_requirement_accepts_a_flash_storage_type(self):
-        nodes, _ = request_for({"preset": "measurement",
-                                "require_flash_storage": True})
-        self.assertEqual(nodes["db1"]["hw"], "c6525-25g")   # SATA SSD
-
-    def test_disk_class_is_recorded_for_every_listed_type(self):
+    def test_the_list_carries_specs_for_every_entry(self):
         src = open(os.path.join(ROOT, "profile.py")).read()
-        self.assertIn("HW_DISK", src)
-        # the free-at-Clemson types are all spindles, and saying so is the
-        # point of the table
-        for t in ("c6320", "c8220", "c8220x", "c4130", "ibm8335"):
-            self.assertIn('"%s": "hdd"' % t, src, t)
-        for t in ("r6615", "c6620", "d7615", "c6525-100g", "r650"):
-            self.assertIn('"%s": "nvme"' % t, src, t)
+        for t in ("c6320", "c6420", "c8220", "c8220x", "c4130", "r650",
+                  "r6615", "r7525", "c6525-25g", "c6525-100g", "c6620",
+                  "d6515", "d7615"):
+            self.assertIn('("%s", "' % t, src, t)
+
+
 
 
 if __name__ == "__main__":
