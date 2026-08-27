@@ -107,7 +107,7 @@ PRESETS = {
     # makes this mappable when the fast pool is nearly full.
     "measurement-het": dict(num_fe_hosts=3, num_db_hosts=3, num_lg_hosts=1,
                             fe_instances=1, hw_type="c6420",
-                            storage_hw_type="c6320", data_size="600GB",
+                            storage_hw_type="r6615", data_size="600GB",
                             client_bw=0, backend_bw=0),
     # Freeze everything that defines the reported configuration. Pin
     # disk_image here too once the submission-era golden image exists.
