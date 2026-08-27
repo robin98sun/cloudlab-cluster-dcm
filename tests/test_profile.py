@@ -56,12 +56,16 @@ class PerRoleHardware(unittest.TestCase):
         self.assertEqual({v["hw"] for v in nodes.values()}, {"c6525-25g"})
 
     def test_storage_type_can_be_overridden_alone(self):
+        # Same cluster: c6320 and c6420 are both at Clemson. (An earlier
+        # version of this test used a Utah type here and now fails, correctly,
+        # against the single-cluster guard below.)
         nodes, _ = request_for({"preset": "measurement-het",
-                                "storage_hw_type": "c6525-25g"})
-        self.assertEqual(nodes["db1"]["hw"], "c6525-25g")
+                                "storage_hw_type": "c6320"})
+        self.assertEqual(nodes["db1"]["hw"], "c6320")
         self.assertEqual(nodes["fe1"]["hw"], "c6420")
 
     def test_custom_storage_type_beats_the_field(self):
+        # xl170 is not in HW_CLUSTER, so the guard leaves it alone
         nodes, _ = request_for({"preset": "measurement-het",
                                 "storage_hw_type": "c6320",
                                 "storage_hw_type_custom": "xl170"})
