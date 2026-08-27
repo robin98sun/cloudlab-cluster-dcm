@@ -91,6 +91,32 @@ HW_CLUSTER = {
     "r650": "clemson", "r7525": "clemson",
 }
 
+# The hardware list, defined once and offered by EVERY hardware parameter.
+# Four separate copies would drift, and a per-group field that is a free-text
+# box while the cluster-wide one is a dropdown is the same list twice with
+# different affordances.
+HW_TYPES = [
+    ("c6525-25g", "Utah c6525-25g: AMD 7302P 16c @3.00GHz, 128GB, 2x480GB SATA SSD"),
+    ("c6525-100g", "Utah c6525-100g: AMD 7402P 24c @2.80GHz, 128GB, 2x1.6TB NVMe"),
+    ("c6620", "Utah c6620: Xeon Gold 5512U 28c @2.1GHz, 128GB, 2x800GB NVMe"),
+    ("d6515", "Utah d6515: AMD 7452 32c @2.35GHz, 128GB, 2x480GB SATA SSD"),
+    ("d7615", "Utah d7615: AMD 9354P 32c @3.25GHz, 192GB, NVMe"),
+    ("c6320", "Clemson c6320: 2x E5-2683v3 28c @2.0GHz, 256GB, 2x1TB HDD"),
+    ("c6420", "Clemson c6420: 2x Xeon Gold 6142 32c @2.6GHz, 384GB, 2x1TB HDD"),
+    ("c8220", "Clemson c8220: 2x E5-2660v2 20c @2.2GHz, 256GB, 2x1TB HDD"),
+    ("c8220x", "Clemson c8220x: 2x E5-2660v2 20c @2.2GHz, 256GB, 20x HDD"),
+    ("c4130", "Clemson c4130: 2x E5-2680v3 24c @2.5GHz, 256GB, 2x1TB HDD, 2x K40m"),
+    ("r650", "Clemson r650: 2x Xeon Plat 8360Y 72c @2.4GHz, 256GB, SATA SSD + NVMe"),
+    ("r6615", "Clemson r6615: AMD 9354P 32c @3.25GHz, 192GB, 2x800GB NVMe"),
+    ("r7525", "Clemson r7525: 2x AMD 7542 64c @2.9GHz, 512GB, 2TB HDD"),
+]
+
+
+def hw_choices(first_label):
+    """The same list, with a parameter-appropriate empty option."""
+    return [("", first_label)] + HW_TYPES
+
+
 PRESETS = {
     "smoke": dict(num_fe_hosts=1, num_db_hosts=1, num_lg_hosts=0,
                   fe_instances=3, data_size="20GB"),
@@ -155,22 +181,8 @@ pc.defineParameter(
                     "admission points enforcing one shared budget.")
 pc.defineParameter(
     "hw_type", "Hardware type", portal.ParameterType.STRING, "",
-    legalValues=[
-        ("", "preset default (c6525-25g) -- leave to let the preset decide"),
-        ("c6525-25g", "Utah c6525-25g: AMD 7302P 16c @3.00GHz, 128GB, 2x480GB SATA SSD"),
-        ("c6525-100g", "Utah c6525-100g: AMD 7402P 24c @2.80GHz, 128GB, 2x1.6TB NVMe"),
-        ("c6620", "Utah c6620: Xeon Gold 5512U 28c @2.1GHz, 128GB, 2x800GB NVMe"),
-        ("d6515", "Utah d6515: AMD 7452 32c @2.35GHz, 128GB, 2x480GB SATA SSD"),
-        ("d7615", "Utah d7615: AMD 9354P 32c @3.25GHz, 192GB, NVMe"),
-        ("c6320", "Clemson c6320: 2x E5-2683v3 28c @2.0GHz, 256GB, 2x1TB HDD"),
-        ("c6420", "Clemson c6420: 2x Xeon Gold 6142 32c @2.6GHz, 384GB, 2x1TB HDD"),
-        ("c8220", "Clemson c8220: 2x E5-2660v2 20c @2.2GHz, 256GB, 2x1TB HDD"),
-        ("c8220x", "Clemson c8220x: 2x E5-2660v2 20c @2.2GHz, 256GB, 20x HDD"),
-        ("c4130", "Clemson c4130: 2x E5-2680v3 24c @2.5GHz, 256GB, 2x1TB HDD, 2x K40m"),
-        ("r650", "Clemson r650: 2x Xeon Plat 8360Y 72c @2.4GHz, 256GB, SATA SSD + NVMe"),
-        ("r6615", "Clemson r6615: AMD 9354P 32c @3.25GHz, 192GB, 2x800GB NVMe"),
-        ("r7525", "Clemson r7525: 2x AMD 7542 64c @2.9GHz, 512GB, 2TB HDD"),
-    ],
+    legalValues=hw_choices(
+        "preset default -- leave to let the preset decide"),
     longDescription="The topology needs only ONE experimental interface per "
                     "node (single shared LAN), so any listed type maps. "
                     "An explicit pick here OVERRIDES the preset's type. "
@@ -183,15 +195,18 @@ pc.defineParameter(
 pc.defineParameter(
     "load_hw_type", "Load-driver hardware type (lg + fe hosts; empty = same as the rest)",
     portal.ParameterType.STRING, "",
+    legalValues=hw_choices("same as the cluster-wide type"),
     longDescription="Hardware for the lg and fe hosts. Empty means the "
                     "cluster-wide type.")
 pc.defineParameter(
     "ctl_hw_type", "Control/observer hardware type (empty = same as the rest)",
     portal.ParameterType.STRING, "",
+    legalValues=hw_choices("same as the cluster-wide type"),
     longDescription="Hardware for ctl1. Empty means the cluster-wide type.")
 pc.defineParameter(
     "storage_hw_type", "Storage-host hardware type (leave empty = same as the rest)",
     portal.ParameterType.STRING, STORAGE_HW_DEFAULT,
+    legalValues=hw_choices("same as the cluster-wide type"),
     longDescription="Hardware for the db hosts. Empty means the "
                     "cluster-wide type.")
 pc.defineParameter(

@@ -204,6 +204,52 @@ class CustomTypes(unittest.TestCase):
             self.assertIn('("%s", "' % t, src, t)
 
 
+class ConsistentChoices(unittest.TestCase):
+    """Every hardware parameter offers the SAME list.
+
+    The cluster-wide type was a dropdown while the three per-group types were
+    free-text boxes -- the same list twice with different affordances, and
+    nothing keeping them in step.
+    """
+
+    def _choices(self):
+        env = dict(os.environ, PYTHONPATH=STUB,
+                   PROFILE_PARAMS=json.dumps({"preset": "measurement-het"}),
+                   DUMP_PARAM_CHOICES="1")
+        p = subprocess.run([sys.executable, os.path.join(ROOT, "profile.py")],
+                           capture_output=True, text=True, env=env, timeout=60)
+        for line in p.stdout.splitlines():
+            if line.startswith("CHOICES "):
+                return json.loads(line[len("CHOICES "):])
+        raise AssertionError("profile did not dump parameter choices")
+
+    def test_all_four_hardware_parameters_are_dropdowns(self):
+        ch = self._choices()
+        for name in ("hw_type", "storage_hw_type", "load_hw_type",
+                     "ctl_hw_type"):
+            self.assertIsNotNone(ch.get(name), "%s is a free-text box" % name)
+
+    def test_they_offer_identical_type_lists(self):
+        ch = self._choices()
+        base = [v for v in ch["hw_type"] if v]
+        for name in ("storage_hw_type", "load_hw_type", "ctl_hw_type"):
+            self.assertEqual([v for v in ch[name] if v], base,
+                             "%s offers a different list" % name)
+        self.assertIn("r6615", base)
+        self.assertIn("c6320", base)
+
+    def test_each_offers_an_empty_option(self):
+        ch = self._choices()
+        for name in ("hw_type", "storage_hw_type", "load_hw_type",
+                     "ctl_hw_type"):
+            self.assertIn("", ch[name], name)
+
+    def test_the_custom_fields_stay_free_text(self):
+        # an unlisted type must remain possible
+        ch = self._choices()
+        for name in ("hw_type_custom", "storage_hw_type_custom",
+                     "load_hw_type_custom", "ctl_hw_type_custom"):
+            self.assertIsNone(ch.get(name), "%s should be free text" % name)
 
 
 if __name__ == "__main__":

@@ -12,6 +12,12 @@ class Context:
     def defineParameter(self, name, desc, ptype, default, legalValues=None,
                         longDescription=None):
         self._defs[name] = default
+        # Record the choices so a test can check every hardware parameter
+        # offers the same list -- the portal enforces legalValues, and a
+        # parameter without them is a free-text box, not a dropdown.
+        self._legal = getattr(self, "_legal", {})
+        self._legal[name] = ([v for v, _ in legalValues]
+                             if legalValues else None)
     def bindParameters(self):
         import os, json
         over = json.loads(os.environ.get("PROFILE_PARAMS", "{}"))
@@ -26,3 +32,6 @@ class Context:
         self.req = Request(); return self.req
     def printRequestRSpec(self, req=None):
         (req or self.req).dump()
+        import json, os
+        if os.environ.get("DUMP_PARAM_CHOICES"):
+            print("CHOICES " + json.dumps(getattr(self, "_legal", {})))
