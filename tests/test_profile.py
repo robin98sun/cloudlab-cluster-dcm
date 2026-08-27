@@ -42,10 +42,12 @@ class PerRoleHardware(unittest.TestCase):
     def test_heterogeneous_preset_puts_the_scarce_type_only_on_storage(self):
         nodes, lans = request_for({"preset": "measurement-het"})
         storage = {k: v for k, v in nodes.items() if k.startswith("db")}
-        other = {k: v for k, v in nodes.items() if not k.startswith("db")}
         self.assertEqual({v["hw"] for v in storage.values()}, {"r6615"})
-        self.assertEqual({v["hw"] for v in other.values()}, {"c6420"})
         self.assertEqual(len(storage), 3)
+        # and nothing else takes the scarce type
+        for k, v in nodes.items():
+            if not k.startswith("db"):
+                self.assertNotEqual(v["hw"], "r6615", k)
         # and they all share ONE experiment LAN, which is the whole point:
         # separate experiments would have to talk over the control network
         self.assertEqual(len(lans), 1)
@@ -62,7 +64,9 @@ class PerRoleHardware(unittest.TestCase):
         nodes, _ = request_for({"preset": "measurement-het",
                                 "storage_hw_type": "c6320"})
         self.assertEqual(nodes["db1"]["hw"], "c6320")
-        self.assertEqual(nodes["fe1"]["hw"], "c6420")
+        # the load group keeps the preset's own choice
+        self.assertEqual(nodes["fe1"]["hw"], "r7525")
+        self.assertEqual(nodes["ctl1"]["hw"], "c6420")
 
     def test_custom_storage_type_beats_the_field(self):
         # xl170 is not in HW_CLUSTER, so the guard leaves it alone
@@ -99,8 +103,6 @@ class PresetPrecedence(unittest.TestCase):
         self.assertEqual(nodes["ctl1"]["hw"], "m510")
 
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
 
 
 class SingleCluster(unittest.TestCase):
@@ -113,18 +115,83 @@ class SingleCluster(unittest.TestCase):
     """
 
     def test_types_from_one_cluster_are_accepted(self):
-        nodes, _ = request_for({"preset": "measurement-het"})   # both Clemson
+        # r6615, r7525 and c6420 are all Clemson
+        nodes, _ = request_for({"preset": "measurement-het"})
         self.assertEqual(nodes["db1"]["hw"], "r6615")
-        self.assertEqual(nodes["fe1"]["hw"], "c6420")
+        self.assertEqual(nodes["fe1"]["hw"], "r7525")
+        self.assertEqual(nodes["ctl1"]["hw"], "c6420")
 
     def test_types_split_across_clusters_are_refused(self):
         with self.assertRaises(AssertionError) as e:
             request_for({"preset": "measurement-het", "hw_type": "c6420",
                          "storage_hw_type": "c6525-25g"})
-        self.assertIn("different CloudLab clusters", str(e.exception))
+        self.assertIn("Pick every type from one cluster", str(e.exception))
 
     def test_an_unknown_type_is_not_assumed_remote(self):
         # a new hardware type is new, not necessarily elsewhere
         nodes, _ = request_for({"preset": "measurement-het",
                                 "storage_hw_type_custom": "brand-new-type"})
         self.assertEqual(nodes["db1"]["hw"], "brand-new-type")
+
+
+class PerGroupHardware(unittest.TestCase):
+    """Three groups, three types, one experiment (user, 2026-08-27)."""
+
+    def test_each_group_takes_its_own_type(self):
+        nodes, lans = request_for({"preset": "measurement-het"})
+        self.assertEqual({v["hw"] for k, v in nodes.items()
+                          if k.startswith("db")}, {"r6615"})
+        self.assertEqual({v["hw"] for k, v in nodes.items()
+                          if k.startswith(("lg", "fe"))}, {"r7525"})
+        self.assertEqual(nodes["ctl1"]["hw"], "c6420")
+        self.assertEqual(len(lans), 1)      # still ONE experiment LAN
+
+    def test_load_type_can_be_set_alone(self):
+        nodes, _ = request_for({"preset": "custom", "hw_type": "c6420",
+                                "load_hw_type": "r7525",
+                                "num_db_hosts": 3, "num_fe_hosts": 1,
+                                "num_lg_hosts": 1})
+        self.assertEqual(nodes["db1"]["hw"], "c6420")
+        self.assertEqual(nodes["lg1"]["hw"], "r7525")
+        self.assertEqual(nodes["fe1"]["hw"], "r7525")
+        self.assertEqual(nodes["ctl1"]["hw"], "c6420")
+
+    def test_control_type_can_be_set_alone(self):
+        nodes, _ = request_for({"preset": "custom", "hw_type": "c6420",
+                                "ctl_hw_type": "c6320",
+                                "num_db_hosts": 3, "num_fe_hosts": 1})
+        self.assertEqual(nodes["ctl1"]["hw"], "c6320")
+        self.assertEqual(nodes["db1"]["hw"], "c6420")
+
+    def test_any_group_crossing_clusters_is_refused(self):
+        # the guard now covers every group, not just storage
+        with self.assertRaises(AssertionError) as e:
+            request_for({"preset": "custom", "hw_type": "c6420",
+                         "load_hw_type": "c6525-25g",
+                         "num_db_hosts": 3, "num_fe_hosts": 1})
+        self.assertIn("Pick every type from one cluster", str(e.exception))
+
+
+class HardwareFacts(unittest.TestCase):
+    """Core count is not speed. From CloudLab's own hardware page."""
+
+    def _profile(self):
+        return open(os.path.join(ROOT, "profile.py")).read()
+
+    def test_clock_speeds_are_recorded(self):
+        src = self._profile()
+        self.assertIn("HW_GHZ", src)
+        for t, ghz in (("c6320", "2.0"), ("c6420", "2.6"),
+                       ("r7525", "2.9"), ("r6615", "3.25")):
+            self.assertIn('"%s": %s' % (t, ghz), src, t)
+
+    def test_labels_state_cpu_and_era_not_only_cores(self):
+        src = self._profile()
+        # the trap: c6320 has 28 cores of 2014 Haswell at 2.0GHz
+        self.assertIn("E5-2683v3", src)
+        self.assertIn("OLDEST cores", src)
+        self.assertIn("9354P", src)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

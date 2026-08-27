@@ -100,7 +100,19 @@ HW_CLUSTER = {
     "c6525-25g": "utah", "c6620": "utah", "d6515": "utah",
     "d7615": "utah", "c6525-100g": "utah",
     "c6420": "clemson", "c6320": "clemson", "r6615": "clemson",
-    "r650": "clemson",
+    "r650": "clemson", "r7525": "clemson",
+}
+
+# Per-core clock, for the roles that are single-thread bound. The load
+# driver's pacer is ONE goroutine per agent firing the whole schedule for its
+# share, so how much load a machine can offer scales with clock and
+# generation rather than with core count -- measured at ~2500 qps per pacer
+# on 2.6GHz Skylake. A 28-core 2014 Haswell at 2.0GHz is the worst choice
+# for that role despite looking respectable on a core count.
+HW_GHZ = {
+    "c6525-25g": 3.00, "c6620": 2.1, "d6515": 2.35, "d7615": 3.25,
+    "c6525-100g": 2.80, "c6420": 2.6, "c6320": 2.0, "r7525": 2.9,
+    "r650": 2.4, "r6615": 3.25,
 }
 
 PRESETS = {
@@ -119,9 +131,13 @@ PRESETS = {
     # Heterogeneous: flash under the replicas, commodity everywhere else.
     # Only THREE machines of the scarce type are requested, which is what
     # makes this mappable when the fast pool is nearly full.
+    # Storage on the NVMe machine with the fastest cores; load generation on
+    # the machine with the most fast cores, since the pacer is single-thread
+    # bound; the observer on whatever is plentiful.
     "measurement-het": dict(num_fe_hosts=3, num_db_hosts=3, num_lg_hosts=1,
                             fe_instances=1, hw_type="c6420",
-                            storage_hw_type="r6615", data_size="600GB",
+                            storage_hw_type="r6615", load_hw_type="r7525",
+                            ctl_hw_type="c6420", data_size="600GB",
                             client_bw=0, backend_bw=0),
     # Freeze everything that defines the reported configuration. Pin
     # disk_image here too once the submission-era golden image exists.
@@ -170,15 +186,22 @@ pc.defineParameter(
     "hw_type", "Hardware type", portal.ParameterType.STRING, "",
     legalValues=[
         ("", "preset default (c6525-25g) -- leave to let the preset decide"),
-        ("c6525-25g", "c6525-25g (Utah): 16c/128GB, 2x25G expt -- usually free"),
-        ("c6620", "c6620 (Utah): 28c/128GB NVMe, 2 expt -- often reserved"),
-        ("d6515", "d6515 (Utah): 32c/128GB, 3 expt ifaces"),
-        ("d7615", "d7615 (Utah): 32c/192GB NVMe, 3 expt -- only 6 exist"),
-        ("c6525-100g", "c6525-100g (Utah): 24c/128GB, 2x100G expt"),
-        ("c6420", "c6420 (Clemson): 32c/384GB HDD, 1 expt iface -- plentiful"),
-        ("c6320", "c6320 (Clemson): 28c/256GB, SSD -- scarcer, good storage"),
-        ("r6615", "r6615 (Clemson): AMD 9254, NVMe -- scarcest, best storage"),
-        ("r650", "r650 (Clemson): NVMe -- scarce, good storage"),
+        # Labels carry CPU, CLOCK and era, because core count alone is
+        # misleading: c6320 has 28 cores of 2014 Haswell at 2.0GHz, while
+        # r6615 has 32 cores of 2025 Genoa at 3.25GHz. Anything bound by
+        # single-thread speed -- the driver's pacer goroutine, a raft
+        # follower's append path -- cares about the clock and the generation,
+        # not the total.
+        ("c6525-25g", "Utah c6525-25g: AMD 7302P 16c @3.00GHz '22, 128GB, SATA SSD"),
+        ("c6620", "Utah c6620: Xeon Gold 5512U 28c @2.1GHz '25, 128GB, NVMe"),
+        ("d6515", "Utah d6515: AMD 7452 32c @2.35GHz, 128GB, SATA SSD"),
+        ("d7615", "Utah d7615: AMD 9354P 32c @3.25GHz '25, 192GB, NVMe -- only 6"),
+        ("c6525-100g", "Utah c6525-100g: AMD 7402P 24c @2.80GHz '22, 128GB, NVMe"),
+        ("c6420", "Clemson c6420: 2x Xeon Gold 6142 32c @2.6GHz '17, 384GB, HDD -- plentiful"),
+        ("c6320", "Clemson c6320: 2x E5-2683v3 28c @2.0GHz '14, 256GB, HDD -- OLDEST cores"),
+        ("r7525", "Clemson r7525: 2x AMD 7542 64c @2.9GHz '20, 512GB, HDD -- best load driver"),
+        ("r650", "Clemson r650: 2x Xeon Plat 8360Y 72c @2.4GHz, 256GB, SSD+NVMe"),
+        ("r6615", "Clemson r6615: AMD 9354P 32c @3.25GHz '25, 192GB, 2x NVMe -- BEST storage"),
     ],
     longDescription="The topology needs only ONE experimental interface per "
                     "node (single shared LAN), so any listed type maps. "
@@ -189,6 +212,22 @@ pc.defineParameter(
                     "the cluster status page for a type with 8 free before "
                     "instantiating. Use hw_type_custom for anything not "
                     "listed. One homogeneous type per comparison series.")
+pc.defineParameter(
+    "load_hw_type", "Load-driver hardware type (lg + fe hosts; empty = same as the rest)",
+    portal.ParameterType.STRING, "",
+    longDescription="Hardware for the load-generating roles. Their bottleneck "
+                    "is SINGLE-THREAD speed, not cores: one pacer goroutine "
+                    "per agent fires the whole schedule for its share, "
+                    "measured at about 2500 qps per pacer on 2.6GHz Skylake. "
+                    "Prefer a high clock and a recent generation; a 28-core "
+                    "2.0GHz Haswell offers less load than a 32-core 2.6GHz "
+                    "Skylake despite the core count looking similar.")
+pc.defineParameter(
+    "ctl_hw_type", "Control/observer hardware type (empty = same as the rest)",
+    portal.ParameterType.STRING, "",
+    longDescription="The observer generates no load and runs the samplers, "
+                    "Prometheus and Grafana. It is the cheapest role to place: "
+                    "give it whatever is plentiful.")
 pc.defineParameter(
     "storage_hw_type", "Storage-host hardware type (leave empty = same as the rest)",
     portal.ParameterType.STRING, STORAGE_HW_DEFAULT,
@@ -241,8 +280,9 @@ pc.defineParameter(
 params = pc.bindParameters()
 
 CONFIG_FIELDS = ("num_fe_hosts", "num_db_hosts", "num_lg_hosts",
-                 "fe_instances", "hw_type", "storage_hw_type", "disk_image",
-                 "data_size", "client_bw", "backend_bw")
+                 "fe_instances", "hw_type", "storage_hw_type", "load_hw_type",
+                 "ctl_hw_type", "disk_image", "data_size", "client_bw",
+                 "backend_bw")
 cfg = {f: getattr(params, f) for f in CONFIG_FIELDS}
 if params.preset != "custom":
     if params.preset not in PRESETS:
@@ -268,23 +308,34 @@ if params.storage_hw_type.strip():
     cfg["storage_hw_type"] = params.storage_hw_type.strip()
 if params.storage_hw_type_custom.strip():
     cfg["storage_hw_type"] = params.storage_hw_type_custom.strip()
-if not cfg.get("storage_hw_type"):
-    cfg["storage_hw_type"] = cfg["hw_type"]
+if params.load_hw_type.strip():
+    cfg["load_hw_type"] = params.load_hw_type.strip()
+if params.ctl_hw_type.strip():
+    cfg["ctl_hw_type"] = params.ctl_hw_type.strip()
+# Every group falls back to the cluster-wide type, so naming none of them
+# gives the homogeneous request unchanged.
+for _g in ("storage_hw_type", "load_hw_type", "ctl_hw_type"):
+    if not cfg.get(_g):
+        cfg[_g] = cfg["hw_type"]
 
 # Both types must live in the SAME cluster. Types we do not recognise are
 # left alone: an unknown type is a new one, not necessarily a remote one.
-_c1 = HW_CLUSTER.get(cfg["hw_type"])
-_c2 = HW_CLUSTER.get(cfg["storage_hw_type"])
-if _c1 and _c2 and _c1 != _c2:
+_seen = {}
+for _f in ("hw_type", "storage_hw_type", "load_hw_type", "ctl_hw_type"):
+    _cl = HW_CLUSTER.get(cfg[_f])
+    if _cl:
+        _seen.setdefault(_cl, []).append("%s=%s" % (_f, cfg[_f]))
+if len(_seen) > 1:
     pc.reportError(portal.ParameterError(
-        "hardware types are in different CloudLab clusters: %s is at %s and "
-        "%s is at %s. One experiment CAN span aggregates, but the LAN between "
-        "them becomes a stitched wide-area link -- tens of milliseconds RTT "
-        "against ~0.1ms locally -- so every raft commit would pay WAN latency "
-        "and the write capacity measured would be the network's, not the "
-        "storage engine's. Pick both types from one cluster."
-        % (cfg["hw_type"], _c1, cfg["storage_hw_type"], _c2),
-        ["hw_type", "storage_hw_type"]))
+        "hardware types span %d CloudLab clusters (%s). One experiment CAN "
+        "span aggregates, but the LAN between them becomes a stitched "
+        "wide-area link -- tens of milliseconds RTT against ~0.1ms locally -- "
+        "so every raft commit would pay WAN latency and the write capacity "
+        "measured would be the network's, not the storage engine's. Pick every "
+        "type from one cluster."
+        % (len(_seen), "; ".join("%s: %s" % (c, ", ".join(v))
+                                 for c, v in sorted(_seen.items()))),
+        ["hw_type", "storage_hw_type", "load_hw_type", "ctl_hw_type"]))
 
 if cfg["num_fe_hosts"] < 1:
     pc.reportError(portal.ParameterError(
@@ -321,7 +372,9 @@ def make_node(name, role, extra_args=""):
     # Per-ROLE hardware. Only the storage role gets the scarce type; asking
     # for three of it instead of eight is what makes the request mappable
     # when the fast pool is nearly full.
-    hw = cfg["storage_hw_type"] if role == "db" else cfg["hw_type"]
+    hw = {"db": cfg["storage_hw_type"],
+          "lg": cfg["load_hw_type"], "fe": cfg["load_hw_type"],
+          "ctl": cfg["ctl_hw_type"]}.get(role, cfg["hw_type"])
     if hw:
         node.hardware_type = hw
     node.disk_image = cfg["disk_image"]
