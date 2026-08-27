@@ -73,6 +73,22 @@ GOLDEN_IMAGE = "urn:publicid:IDN+utah.cloudlab.us+image+aces-project-01-PG0:DCM-
 # selection override a preset.
 DEFAULT_HW = "c6525-25g"
 
+# STORAGE hardware is the scarce resource; everything else is not.
+#
+# The measured reason: write capacity is fsync-bound, and the log device sets
+# it -- 19.5 qps on a 7200RPM disk against thousands on flash, on identical
+# code and MORE cores (doc 11). Reads and the load generators are bound by
+# CPU and network, which the plentiful machines have in abundance. So a
+# cluster that puts flash under the replicas and spends commodity nodes on
+# the control plane, the front tier and the load drivers gets the property
+# that matters while asking the scheduler for only three scarce machines.
+#
+# It also maps far more often. A request for eight of a type with four free
+# fails outright; a request for three of that type plus five of a plentiful
+# one succeeds -- which is the difference between running tonight and
+# queueing for a reservation.
+STORAGE_HW_DEFAULT = ""      # "" means: use the cluster-wide hw_type
+
 PRESETS = {
     "smoke": dict(num_fe_hosts=1, num_db_hosts=1, num_lg_hosts=0,
                   fe_instances=3, data_size="20GB"),
@@ -86,6 +102,13 @@ PRESETS = {
     "measurement": dict(num_fe_hosts=3, num_db_hosts=3, num_lg_hosts=1,
                         fe_instances=1, hw_type="c6525-25g",
                         data_size="600GB", client_bw=0, backend_bw=0),
+    # Heterogeneous: flash under the replicas, commodity everywhere else.
+    # Only THREE machines of the scarce type are requested, which is what
+    # makes this mappable when the fast pool is nearly full.
+    "measurement-het": dict(num_fe_hosts=3, num_db_hosts=3, num_lg_hosts=1,
+                            fe_instances=1, hw_type="c6420",
+                            storage_hw_type="c6320", data_size="600GB",
+                            client_bw=0, backend_bw=0),
     # Freeze everything that defines the reported configuration. Pin
     # disk_image here too once the submission-era golden image exists.
     "submission": dict(num_fe_hosts=3, num_db_hosts=3, num_lg_hosts=1,
@@ -100,6 +123,8 @@ pc.defineParameter(
     legalValues=[("smoke", "smoke: 3 machines, 1 db host (plumbing-valid)"),
                  ("full", "full: 5 machines, 3 db hosts (plumbing-valid)"),
                  ("measurement", "measurement: 8 machines, 3 FE hosts, dedicated LG"),
+                 ("measurement-het", "measurement-het: same 8, but only the 3 "
+                  "storage hosts use the scarce fast type"),
                  ("submission", "submission: frozen measurement-scale bindings"),
                  ("custom", "custom: use the individual fields below")],
     longDescription="Anything other than 'custom' overrides the individual "
@@ -136,7 +161,10 @@ pc.defineParameter(
         ("d6515", "d6515 (Utah): 32c/128GB, 3 expt ifaces"),
         ("d7615", "d7615 (Utah): 32c/192GB NVMe, 3 expt -- only 6 exist"),
         ("c6525-100g", "c6525-100g (Utah): 24c/128GB, 2x100G expt"),
-        ("c6420", "c6420 (Clemson): 32c/384GB, 1 expt iface"),
+        ("c6420", "c6420 (Clemson): 32c/384GB HDD, 1 expt iface -- plentiful"),
+        ("c6320", "c6320 (Clemson): 28c/256GB, SSD -- scarcer, good storage"),
+        ("r6615", "r6615 (Clemson): AMD 9254, NVMe -- scarcest, best storage"),
+        ("r650", "r650 (Clemson): NVMe -- scarce, good storage"),
     ],
     longDescription="The topology needs only ONE experimental interface per "
                     "node (single shared LAN), so any listed type maps. "
@@ -147,6 +175,21 @@ pc.defineParameter(
                     "the cluster status page for a type with 8 free before "
                     "instantiating. Use hw_type_custom for anything not "
                     "listed. One homogeneous type per comparison series.")
+pc.defineParameter(
+    "storage_hw_type", "Storage-host hardware type (leave empty = same as the rest)",
+    portal.ParameterType.STRING, STORAGE_HW_DEFAULT,
+    longDescription="Hardware for the db hosts ONLY. Write capacity is "
+                    "fsync-bound, so the log device -- not the core count -- "
+                    "decides it: 19.5 qps on a 7200RPM disk against thousands "
+                    "on flash, same code, more cores. Put the scarce fast "
+                    "machines here and commodity ones everywhere else. Three "
+                    "scarce machines also map far more often than eight: a "
+                    "request for eight of a type with four free fails "
+                    "outright. Empty means every role uses the same type.")
+pc.defineParameter(
+    "storage_hw_type_custom", "Custom storage hardware type (overrides the field above)",
+    portal.ParameterType.STRING, "",
+    longDescription="Escape hatch for a storage type not in the list.")
 pc.defineParameter(
     "hw_type_custom", "Custom hardware type (overrides the list)",
     portal.ParameterType.STRING, "",
@@ -184,8 +227,8 @@ pc.defineParameter(
 params = pc.bindParameters()
 
 CONFIG_FIELDS = ("num_fe_hosts", "num_db_hosts", "num_lg_hosts",
-                 "fe_instances", "hw_type", "disk_image", "data_size",
-                 "client_bw", "backend_bw")
+                 "fe_instances", "hw_type", "storage_hw_type", "disk_image",
+                 "data_size", "client_bw", "backend_bw")
 cfg = {f: getattr(params, f) for f in CONFIG_FIELDS}
 if params.preset != "custom":
     if params.preset not in PRESETS:
@@ -205,6 +248,14 @@ if params.hw_type_custom.strip():
     cfg["hw_type"] = params.hw_type_custom.strip()
 if not cfg["hw_type"]:
     cfg["hw_type"] = DEFAULT_HW
+# Storage hardware follows the same precedence, and falls back to the
+# cluster-wide type so a homogeneous request still works unchanged.
+if params.storage_hw_type.strip():
+    cfg["storage_hw_type"] = params.storage_hw_type.strip()
+if params.storage_hw_type_custom.strip():
+    cfg["storage_hw_type"] = params.storage_hw_type_custom.strip()
+if not cfg.get("storage_hw_type"):
+    cfg["storage_hw_type"] = cfg["hw_type"]
 
 if cfg["num_fe_hosts"] < 1:
     pc.reportError(portal.ParameterError(
@@ -238,8 +289,12 @@ if cfg["client_bw"] > 0:
 
 def make_node(name, role, extra_args=""):
     node = request.RawPC(name)
-    if cfg["hw_type"]:
-        node.hardware_type = cfg["hw_type"]
+    # Per-ROLE hardware. Only the storage role gets the scarce type; asking
+    # for three of it instead of eight is what makes the request mappable
+    # when the fast pool is nearly full.
+    hw = cfg["storage_hw_type"] if role == "db" else cfg["hw_type"]
+    if hw:
+        node.hardware_type = hw
     node.disk_image = cfg["disk_image"]
     node.addService(pg.Execute(
         shell="bash",
