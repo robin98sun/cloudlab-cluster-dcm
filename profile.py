@@ -122,23 +122,33 @@ PRESETS = {
                   fe_instances=3, data_size="20GB"),
     "full": dict(num_fe_hosts=1, num_db_hosts=3, num_lg_hosts=0,
                  fe_instances=3, data_size="600GB"),
-    # measurement-v1: the measurement-valid topology (8 machines).
-    # 3 independent FE hosts (1 controller instance each = independent
-    # failure domains and resources), dedicated load generator, monitor/
-    # orchestrator free of load generation. Runs are measurement-valid only
-    # when the validity gates in the runbook also pass.
-    "measurement": dict(num_fe_hosts=3, num_db_hosts=3, num_lg_hosts=1,
+    # measurement-v2: the measurement-valid topology (24 machines).
+    # Sized by MEASUREMENT, not guesswork: on NVMe-class storage the load
+    # tier is the bottleneck long before the database is. Three 4-core
+    # storage pods needed ~290k read qps to saturate, and a load host
+    # paces cleanly at about one agent per physical core x ~2.4k qps
+    # (~43k/host on 20-core c8220s; 23 agents/host already failed the pace
+    # gate at 2.83% late). Four load hosts therefore topped out at ~180k --
+    # 55% of pod CPU -- and the "capacity" that fleet measures is its own.
+    # Ten LG hosts give ~430k qps of honest pacing, enough to saturate the
+    # storage tier with margin; ten FE hosts keep the front tier from
+    # becoming the same kind of hidden ceiling when requests flow through
+    # it. 10:10:3 is the ratio that lets 3 NVMe storage nodes actually be
+    # the thing measured.
+    "measurement": dict(num_fe_hosts=10, num_db_hosts=3, num_lg_hosts=10,
                         fe_instances=1, hw_type="c6525-25g",
                         data_size="600GB", client_bw=0, backend_bw=0),
-    # Different hardware per group, in one experiment.
-    "measurement-het": dict(num_fe_hosts=3, num_db_hosts=3, num_lg_hosts=1,
+    # Different hardware per group, in one experiment. Same 10:10:3 sizing;
+    # the load and FE tiers are commodity on purpose -- pacing needs cores,
+    # not fast storage -- but there must be ENOUGH of them.
+    "measurement-het": dict(num_fe_hosts=10, num_db_hosts=3, num_lg_hosts=10,
                             fe_instances=1, hw_type="c6420",
                             storage_hw_type="r6615", load_hw_type="r7525",
                             ctl_hw_type="c6420", data_size="600GB",
                             client_bw=0, backend_bw=0),
     # Freeze everything that defines the reported configuration. Pin
     # disk_image here too once the submission-era golden image exists.
-    "submission": dict(num_fe_hosts=3, num_db_hosts=3, num_lg_hosts=1,
+    "submission": dict(num_fe_hosts=10, num_db_hosts=3, num_lg_hosts=10,
                        fe_instances=1, hw_type="c6525-25g", data_size="600GB",
                        client_bw=0, backend_bw=0),
 }
@@ -160,9 +170,11 @@ pc.defineParameter(
                     "every result bundle can name its configuration by commit.")
 pc.defineParameter(
     "num_fe_hosts", "Frontend hosts (custom preset)",
-    portal.ParameterType.INTEGER, 1,
+    portal.ParameterType.INTEGER, 10,
     longDescription="Each runs fe_instances FE+testbed pods; one host already "
-                    "preserves the multi-upstream property.")
+                    "preserves the multi-upstream property, but front-tier "
+                    "throughput must scale with the load tier or it becomes "
+                    "the hidden ceiling. Default 10 per 3 storage hosts.")
 pc.defineParameter(
     "num_db_hosts", "Storage hosts (custom preset)",
     portal.ParameterType.INTEGER, 1,
@@ -170,9 +182,14 @@ pc.defineParameter(
                     "2 is refused.")
 pc.defineParameter(
     "num_lg_hosts", "Dedicated load-generator hosts (custom preset)",
-    portal.ParameterType.INTEGER, 0,
-    longDescription="0 runs load generation on ctl1. Add hosts only when "
-                    "stub_lg's late_sends gate shows pacing degradation.")
+    portal.ParameterType.INTEGER, 10,
+    longDescription="Open-loop pacing holds about one agent per physical "
+                    "core at ~2.4k qps each (~43k/host on 20-core machines), "
+                    "and a fleet that cannot outrun the storage tier measures "
+                    "ITSELF -- four hosts topped out at 55%% of pod CPU and "
+                    "the pace gate voided everything above it. Default 10 per "
+                    "3 NVMe storage hosts. 0 runs load generation on ctl1 "
+                    "(smoke only).")
 pc.defineParameter(
     "fe_instances", "FE pods per frontend host (custom preset)",
     portal.ParameterType.INTEGER, 3,

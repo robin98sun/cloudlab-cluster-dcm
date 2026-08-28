@@ -49,9 +49,13 @@ class PerRoleHardware(unittest.TestCase):
             if not k.startswith("db"):
                 self.assertNotEqual(v["hw"], "r6615", k)
         # and they all share ONE experiment LAN, which is the whole point:
-        # separate experiments would have to talk over the control network
+        # separate experiments would have to talk over the control network.
+        # 24 machines now: 10 LG + 10 FE + 3 storage + ctl. Sized by
+        # measurement -- four load hosts topped out at 55% of storage pod
+        # CPU and the pace gate voided everything above, so the fleet was
+        # measuring itself.
         self.assertEqual(len(lans), 1)
-        self.assertIn("8 ifaces", lans[0])
+        self.assertIn("24 ifaces", lans[0])
 
     def test_homogeneous_preset_is_unchanged(self):
         nodes, _ = request_for({"preset": "measurement"})
