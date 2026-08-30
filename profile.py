@@ -317,13 +317,23 @@ for _g in ("storage_hw_type", "load_hw_type", "ctl_hw_type"):
     if not cfg.get(_g):
         cfg[_g] = cfg["hw_type"]
 
-# Both types must live in the SAME cluster. Types we do not recognise are
-# left alone: an unknown type is a new one, not necessarily a remote one.
+# Every type that PLACES A NODE must live in the same cluster. The check
+# runs over the three role types only: once every role has an explicit
+# type, the cluster-wide hw_type places nothing -- it is a fallback
+# source, already propagated above. Including it compared the preset's
+# default (utah c6525-25g) against a fully-Clemson selection and refused
+# a request that named no utah node at all.
 _seen = {}
-for _f in ("hw_type", "storage_hw_type", "load_hw_type", "ctl_hw_type"):
+for _f in ("storage_hw_type", "load_hw_type", "ctl_hw_type"):
     _cl = HW_CLUSTER.get(cfg[_f])
     if _cl:
         _seen.setdefault(_cl, []).append("%s=%s" % (_f, cfg[_f]))
+# Keep the unused fallback consistent with the chosen cluster, so any
+# future role that falls back to hw_type cannot stitch a wide-area LAN.
+if len(_seen) == 1:
+    _used_cl = next(iter(_seen))
+    if HW_CLUSTER.get(cfg["hw_type"]) not in (None, _used_cl):
+        cfg["hw_type"] = cfg["storage_hw_type"]
 if len(_seen) > 1:
     pc.reportError(portal.ParameterError(
         "hardware types span %d CloudLab clusters (%s). A LAN between "
