@@ -2,7 +2,7 @@
 # Bring a freshly instantiated testbed to a fully deployed state.
 #
 # Idempotent: safe to re-run. Everything it does is derived from topology.json,
-# so it works for any preset. Node hostnames come from the CloudLab manifest.
+# so it works for any cluster shape. Node hostnames come from the CloudLab manifest.
 #
 #   ./bringup.sh                 # full bring-up
 #   ./bringup.sh --skip-smoke    # skip the 13-check suite

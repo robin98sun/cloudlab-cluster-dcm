@@ -12,7 +12,7 @@ isolated client/backend experiment LANs, explicit pod placement, two-layer
 image-aware bootstrap, a 13-check smoke suite, and checksummed result bundles.
 
 ```
-profile.py                 CloudLab geni-lib profile (presets: smoke/full/submission)
+profile.py                 CloudLab geni-lib profile (flat fields, no presets)
 cloudlab/bootstrap.sh      two-layer node bootstrap (bake layer + boot layer)
 cloudlab/bake.sh           prepare a node for golden-image capture
 cloudlab/gen_manifests.py  k8s objects with pinned placement

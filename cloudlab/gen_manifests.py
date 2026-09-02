@@ -140,7 +140,7 @@ def main():
             cpu_request=str(a.db_cores)))
 
     # Load generator pod on the ctl host (or a dedicated lg host when the
-    # measurement preset allocates one). Idle until the harness drives it.
+    # the measurement shape allocates one). Idle until the harness drives it.
     items.append(pod(
         "lg1", a.lg_host, "lg",
         ["sleep", "infinity"],

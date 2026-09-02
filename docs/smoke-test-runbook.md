@@ -13,7 +13,7 @@ db1    1 storage pod (db1, port 9091)                 backend LAN
 ```
 
 The full 5-machine topology (3 db hosts) uses the same profile with
-`preset=full`. Placement rules are fixed in `cloudlab/gen_manifests.py`:
+`num_db_hosts=3`. Placement rules are fixed in `cloudlab/gen_manifests.py`:
 frontend and storage pods never share a host, storage replicas never share a
 host, frontend pods colocate. Every pod is pinned by hostname — placement is
 a recorded decision, not a scheduler outcome.
@@ -40,25 +40,26 @@ in aggregate.
 
 Create a repo-backed profile in the CloudLab portal pointing at this
 repository (`profile.py` at the root — CloudLab requires the top-level
-location). Instantiate with the default `preset=smoke` on **CloudLab Utah**
-(the vetted node types live there). The first boot downloads packages, the k3s binary, and
-the pod base image — the slow path the golden image later removes.
+location). The first boot downloads packages, the k3s binary, and the pod
+base image — the slow path the golden image later removes.
 
-Purposes are presets of the one profile, selected at instantiation:
+The form is one flat set of fields; there are no presets and no dropdowns.
+Fill in host counts and hardware types directly. The shapes worth knowing:
 
-| preset | machines | topology | validity class |
+| purpose | machines | fields | validity class |
 |---|---:|---|---|
-| `smoke` | 3 | ctl+lg / 1 fe host (3 pods) / 1 db | plumbing-valid |
-| `full` | 5 | ctl+lg / 1 fe host (3 pods) / 3 db | plumbing-valid |
-| `measurement` | 8 | ctl / lg1 / fe1-3 (1 pod each) / db1-3 | measurement-valid **when gates pass** |
-| `submission` | 8 | frozen measurement bindings; bind the portal profile to a release **tag** | measurement-valid when gates pass |
-| `custom` | — | individual form fields | — |
+| smoke | 3 | `num_db_hosts=1`, `num_fe_hosts=1`, `num_lg_hosts=0`, `fe_instances=3` | plumbing-valid |
+| replicated | 5 | `num_db_hosts=3`, `num_fe_hosts=1`, `num_lg_hosts=0`, `fe_instances=3` | plumbing-valid |
+| measurement | 24 | `num_db_hosts=3`, `num_fe_hosts=10`, `num_lg_hosts=10`, `fe_instances=1` | measurement-valid **when gates pass** |
 
-**Validity classes.** Plumbing-valid presets verify wiring, placement, and
+For reported results, bind a second portal profile object to a release
+**tag** of this repo so the configuration cannot drift.
+
+**Validity classes.** Plumbing-valid shapes verify wiring, placement, and
 accounting; they colocate roles (one FE host, LG on ctl) and are never a
-measurement or paper baseline. The `measurement` preset gives each FE
-controller its own host (independent failure domains/resources), a dedicated
-load generator, and a monitor free of load generation. Pod-failure and
+measurement or paper baseline. The measurement shape gives each FE
+controller its own host (independent failure domains/resources), dedicated
+load generators, and a monitor free of load generation. Pod-failure and
 host-failure experiments must be labeled separately.
 
 **Declared measurement validity gates** (a run's verdict is valid only if all
@@ -72,12 +73,11 @@ hold during the measurement window and are recorded in the bundle):
 
 Automated gate enforcement is not yet implemented in the harness. Until it is,
 and until a bundle carries machine-generated passing gate results, every run is
-treated as plumbing-valid regardless of preset.
+treated as plumbing-valid regardless of the shape requested.
 
-A preset **overrides** the individual fields it defines; `disk_image` is
-never preset-bound and always comes from the form (pin the golden URN as its
-default). For dev-vs-official coexistence, create two portal profile objects
-over the same file: one tracking `main`, one pinned to a release tag.
+Every value comes from the form, `disk_image` included (pin the golden URN
+as its default). For dev-vs-official coexistence, create two portal profile
+objects over the same file: one tracking `main`, one pinned to a release tag.
 
 Then:
 
