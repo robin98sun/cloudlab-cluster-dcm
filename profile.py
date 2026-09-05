@@ -36,6 +36,11 @@ host, DB replicas never share a host, FE pods colocate.
 Per-role hardware requirements when substituting hw_type:
     all      : ONE experimental interface suffices (single shared LAN)
     db hosts : local disk large enough for the data blockstore
+    fe hosts : cores and network; they carry the admission gates
+    lg hosts : cores for pacing; neither disk nor gate work
+  fe and lg take separate types because a cluster commonly has plenty of
+  one and little of the other, and one shared field failed the whole
+  allocation whenever either ran short
     all      : one homogeneous type within any comparison series -- results
                are comparable within a type, never across; S03 warns on
                mixed allocations
@@ -128,9 +133,21 @@ pc.defineParameter(
     longDescription="Hardware for the db hosts. These want the local disk, "
                     "so this is the one worth naming separately.")
 pc.defineParameter(
-    "load_hw_type", "Load-driver hardware type, lg + fe hosts (empty = same as above)",
+    "load_hw_type", "Load-driver hardware type, lg hosts (empty = same as above)",
     portal.ParameterType.STRING, "",
     longDescription="Pacing needs cores, not fast storage.")
+pc.defineParameter(
+    "fe_hw_type", "Frontend hardware type, fe hosts (empty = same as the "
+                  "load-driver type)",
+    portal.ParameterType.STRING, "",
+    longDescription="Frontend hosts carry the admission gates and every pod's "
+                    "share of the offered load, so they want cores and network "
+                    "rather than disk. Separate from the load-driver type "
+                    "because a cluster often has plenty of one and little of "
+                    "the other, and pinning both to one type fails the whole "
+                    "allocation when either runs short. Empty follows the "
+                    "load-driver type, which is what this did before it was "
+                    "split.")
 pc.defineParameter(
     "ctl_hw_type", "Control/observer hardware type (empty = same as above)",
     portal.ParameterType.STRING, "",
@@ -165,17 +182,23 @@ params = pc.bindParameters()
 
 CONFIG_FIELDS = ("num_fe_hosts", "num_db_hosts", "num_lg_hosts",
                  "fe_instances", "hw_type", "storage_hw_type", "load_hw_type",
-                 "ctl_hw_type", "disk_image", "data_size", "client_bw",
+                 "fe_hw_type", "ctl_hw_type", "disk_image", "data_size", "client_bw",
                  "backend_bw")
 cfg = {f: getattr(params, f) for f in CONFIG_FIELDS}
-for _f in ("hw_type", "storage_hw_type", "load_hw_type", "ctl_hw_type",
+for _f in ("hw_type", "storage_hw_type", "load_hw_type", "fe_hw_type",
+           "ctl_hw_type",
            "disk_image", "data_size"):
     cfg[_f] = cfg[_f].strip()
 if not cfg["hw_type"]:
     cfg["hw_type"] = DEFAULT_HW
 # Every per-role type falls back to the cluster-wide one, so naming none of
 # them gives the homogeneous request unchanged.
-for _g in ("storage_hw_type", "load_hw_type", "ctl_hw_type"):
+# fe_hw_type falls back to the LOAD type, not the cluster-wide one: before
+# the split these two shared a field, so an unset fe type must still land
+# wherever load_hw_type points or an existing invocation changes meaning.
+if not cfg["fe_hw_type"]:
+    cfg["fe_hw_type"] = cfg["load_hw_type"]
+for _g in ("storage_hw_type", "load_hw_type", "fe_hw_type", "ctl_hw_type"):
     if not cfg[_g]:
         cfg[_g] = cfg["hw_type"]
 
@@ -186,7 +209,7 @@ for _g in ("storage_hw_type", "load_hw_type", "ctl_hw_type"):
 # (utah c6525-25g) against a fully-Clemson selection and refused a
 # request that named no utah node at all.
 _seen = {}
-for _f in ("storage_hw_type", "load_hw_type", "ctl_hw_type"):
+for _f in ("storage_hw_type", "load_hw_type", "fe_hw_type", "ctl_hw_type"):
     _cl = HW_CLUSTER.get(cfg[_f])
     if _cl:
         _seen.setdefault(_cl, []).append("%s=%s" % (_f, cfg[_f]))
@@ -203,7 +226,8 @@ if len(_seen) > 1:
         "~0.1ms locally. Pick every type from one cluster."
         % (len(_seen), "; ".join("%s: %s" % (c, ", ".join(v))
                                  for c, v in sorted(_seen.items()))),
-        ["hw_type", "storage_hw_type", "load_hw_type", "ctl_hw_type"]))
+        ["hw_type", "storage_hw_type", "load_hw_type", "fe_hw_type",
+         "ctl_hw_type"]))
 
 if cfg["num_fe_hosts"] < 1:
     pc.reportError(portal.ParameterError(
@@ -239,7 +263,7 @@ def make_node(name, role, extra_args=""):
     node = request.RawPC(name)
     # Per-group hardware type.
     hw = {"db": cfg["storage_hw_type"],
-          "lg": cfg["load_hw_type"], "fe": cfg["load_hw_type"],
+          "lg": cfg["load_hw_type"], "fe": cfg["fe_hw_type"],
           "ctl": cfg["ctl_hw_type"]}.get(role, cfg["hw_type"])
     if hw:
         node.hardware_type = hw

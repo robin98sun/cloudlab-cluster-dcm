@@ -125,6 +125,31 @@ class PerRoleHardware(unittest.TestCase):
         self.assertEqual(nodes["fe1"]["hw"], "r7525")
         self.assertEqual(nodes["ctl1"]["hw"], "c6420")
 
+    def test_frontend_type_can_be_set_alone(self):
+        """fe and lg used to share one field. A cluster often has plenty of
+        one type and little of the other, and pinning both to the same type
+        fails the whole allocation when either runs short."""
+        nodes, _ = request_for(with_(num_lg_hosts=1, fe_hw_type="r7525"))
+        self.assertEqual(nodes["fe1"]["hw"], "r7525")
+        self.assertEqual(nodes["lg1"]["hw"], "c6420")   # unchanged
+        self.assertEqual(nodes["db1"]["hw"], "c6420")
+        self.assertEqual(nodes["ctl1"]["hw"], "c6420")
+
+    def test_frontend_and_load_can_differ(self):
+        nodes, _ = request_for(with_(num_lg_hosts=1, num_fe_hosts=1,
+                                     load_hw_type="c6320",
+                                     fe_hw_type="r7525"))
+        self.assertEqual(nodes["lg1"]["hw"], "c6320")
+        self.assertEqual(nodes["fe1"]["hw"], "r7525")
+
+    def test_an_unset_frontend_type_follows_the_load_type(self):
+        """The compatibility rule: before the split these shared a field, so
+        an unset fe type must land wherever load_hw_type points -- NOT on the
+        cluster-wide type, which would silently change existing invocations."""
+        nodes, _ = request_for(with_(num_lg_hosts=1, load_hw_type="r7525"))
+        self.assertEqual(nodes["fe1"]["hw"], "r7525")
+        self.assertEqual(nodes["lg1"]["hw"], "r7525")
+
     def test_control_type_can_be_set_alone(self):
         nodes, _ = request_for(with_(ctl_hw_type="c6320"))
         self.assertEqual(nodes["ctl1"]["hw"], "c6320")
