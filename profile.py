@@ -128,10 +128,19 @@ pc.defineParameter(
                     "c8220x, c4130, r650, r6615, r6525, r7525. Utah: "
                     "c6525-25g, c6525-100g, c6620, d6515, d7615.")
 pc.defineParameter(
-    "storage_hw_type", "Storage-host hardware type (empty = same as above)",
+    "storage_hw_type", "Storage-host hardware type(s) (empty = same as above)",
     portal.ParameterType.STRING, "",
     longDescription="Hardware for the db hosts. These want the local disk, "
-                    "so this is the one worth naming separately.")
+                    "so this is the one worth naming separately. Accepts a "
+                    "COMMA-SEPARATED LIST, one entry per db host, so a "
+                    "3-node storage cluster can be assembled out of the "
+                    "singletons a cluster happens to have free -- e.g. "
+                    "'r6525,r6525,r6515'. A single name applies to every db "
+                    "host, which is what this field meant before it took a "
+                    "list. Any other count is refused. NVMe is preferred and "
+                    "SATA SSD is the fallback; spinning disk is not usable "
+                    "here. Every entry must still be from the SAME cluster "
+                    "as the other roles.")
 pc.defineParameter(
     "load_hw_type", "Load-driver hardware type, lg hosts (empty = same as above)",
     portal.ParameterType.STRING, "",
@@ -202,23 +211,46 @@ for _g in ("storage_hw_type", "load_hw_type", "fe_hw_type", "ctl_hw_type"):
     if not cfg[_g]:
         cfg[_g] = cfg["hw_type"]
 
+# Storage hardware may be heterogeneous: a comma-separated list, one entry
+# per db host. A 3-node storage cluster is often only reachable by taking
+# the two of one type and the one of another that a cluster has free, and
+# refusing that mix would mean no storage tier at all. One entry applies to
+# every host, so a plain type name keeps its old meaning.
+cfg["storage_hw_types"] = [_t.strip()
+                           for _t in cfg["storage_hw_type"].split(",")
+                           if _t.strip()]
+if len(cfg["storage_hw_types"]) == 1:
+    cfg["storage_hw_types"] *= cfg["num_db_hosts"]
+elif len(cfg["storage_hw_types"]) != cfg["num_db_hosts"]:
+    pc.reportError(portal.ParameterError(
+        "storage_hw_type lists %d types for %d storage hosts. Give one "
+        "type for all of them, or exactly one per host."
+        % (len(cfg["storage_hw_types"]), cfg["num_db_hosts"]),
+        ["storage_hw_type", "num_db_hosts"]))
+
 # Every type that PLACES A NODE must live in the same cluster. The check
 # runs over the three role types only: once every role has an explicit
 # type, the cluster-wide hw_type places nothing -- it is a fallback
 # source, already propagated above. Including it compared the default
 # (utah c6525-25g) against a fully-Clemson selection and refused a
 # request that named no utah node at all.
+_pairs = [(_f, cfg[_f])
+          for _f in ("load_hw_type", "fe_hw_type", "ctl_hw_type")]
+# Each storage entry is checked on its own: a heterogeneous storage tier is
+# fine, a storage tier straddling two aggregates is not.
+_pairs += [("storage_hw_type[%d]" % _i, _t)
+           for _i, _t in enumerate(cfg["storage_hw_types"])]
 _seen = {}
-for _f in ("storage_hw_type", "load_hw_type", "fe_hw_type", "ctl_hw_type"):
-    _cl = HW_CLUSTER.get(cfg[_f])
+for _f, _t in _pairs:
+    _cl = HW_CLUSTER.get(_t)
     if _cl:
-        _seen.setdefault(_cl, []).append("%s=%s" % (_f, cfg[_f]))
+        _seen.setdefault(_cl, []).append("%s=%s" % (_f, _t))
 # Keep the unused fallback consistent with the chosen cluster, so any
 # future role that falls back to hw_type cannot stitch a wide-area LAN.
 if len(_seen) == 1:
     _used_cl = next(iter(_seen))
     if HW_CLUSTER.get(cfg["hw_type"]) not in (None, _used_cl):
-        cfg["hw_type"] = cfg["storage_hw_type"]
+        cfg["hw_type"] = cfg["storage_hw_types"][0]
 if len(_seen) > 1:
     pc.reportError(portal.ParameterError(
         "hardware types span %d CloudLab clusters (%s). A LAN between "
@@ -259,12 +291,13 @@ if cfg["client_bw"] > 0:
 # is a no-op: there is no second LAN any more.
 
 
-def make_node(name, role, extra_args=""):
+def make_node(name, role, extra_args="", hw=None):
     node = request.RawPC(name)
-    # Per-group hardware type.
-    hw = {"db": cfg["storage_hw_type"],
-          "lg": cfg["load_hw_type"], "fe": cfg["fe_hw_type"],
-          "ctl": cfg["ctl_hw_type"]}.get(role, cfg["hw_type"])
+    # Per-group hardware type. db hosts pass their own, since the storage
+    # tier may be heterogeneous.
+    if hw is None:
+        hw = {"lg": cfg["load_hw_type"], "fe": cfg["fe_hw_type"],
+              "ctl": cfg["ctl_hw_type"]}.get(role, cfg["hw_type"])
     if hw:
         node.hardware_type = hw
     node.disk_image = cfg["disk_image"]
@@ -296,7 +329,7 @@ for j in range(1, cfg["num_fe_hosts"] + 1):
     attach(n, expt_lan, "10.10.1.%d" % (20 + j))
 
 for k in range(1, cfg["num_db_hosts"] + 1):
-    n = make_node("db%d" % k, "db")
+    n = make_node("db%d" % k, "db", hw=cfg["storage_hw_types"][k - 1])
     attach(n, expt_lan, "10.10.1.%d" % (30 + k))
     if cfg["data_size"]:
         bs = n.Blockstore("db%d-data" % k, "/mnt/data")

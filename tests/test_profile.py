@@ -118,6 +118,38 @@ class PerRoleHardware(unittest.TestCase):
         self.assertEqual(nodes["fe1"]["hw"], "c6420")
         self.assertEqual(nodes["ctl1"]["hw"], "c6420")
 
+    def test_storage_types_may_differ_per_host(self):
+        # The 3-node storage cluster is often only reachable by taking the
+        # two of one type and the one of another that a cluster has free.
+        nodes, _ = request_for(with_(num_db_hosts=3,
+                                     storage_hw_type="r6525,r6525,r6615"))
+        self.assertEqual(nodes["db1"]["hw"], "r6525")
+        self.assertEqual(nodes["db2"]["hw"], "r6525")
+        self.assertEqual(nodes["db3"]["hw"], "r6615")
+
+    def test_one_storage_type_still_applies_to_every_host(self):
+        nodes, _ = request_for(with_(num_db_hosts=3, storage_hw_type="c6320"))
+        self.assertEqual({nodes["db%d" % k]["hw"] for k in (1, 2, 3)},
+                         {"c6320"})
+
+    def test_a_storage_list_of_the_wrong_length_is_refused(self):
+        with self.assertRaises(AssertionError) as e:
+            request_for(with_(num_db_hosts=3,
+                              storage_hw_type="r6525,r6615"))
+        self.assertIn("one per host", str(e.exception))
+
+    def test_storage_list_entries_are_trimmed(self):
+        nodes, _ = request_for(with_(num_db_hosts=3,
+                                     storage_hw_type=" r6525 , r6525 , r6615 "))
+        self.assertEqual(nodes["db3"]["hw"], "r6615")
+
+    def test_a_storage_list_crossing_clusters_is_refused(self):
+        # Heterogeneous is fine; straddling two aggregates is not.
+        with self.assertRaises(AssertionError) as e:
+            request_for(with_(num_db_hosts=3,
+                              storage_hw_type="r6525,r6525,c6525-25g"))
+        self.assertIn("Pick every type from one cluster", str(e.exception))
+
     def test_load_type_can_be_set_alone(self):
         nodes, _ = request_for(with_(num_lg_hosts=1, load_hw_type="r7525"))
         self.assertEqual(nodes["db1"]["hw"], "c6420")
