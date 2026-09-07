@@ -150,6 +150,61 @@ class PerRoleHardware(unittest.TestCase):
                               storage_hw_type="r6525,r6525,c6525-25g"))
         self.assertIn("Pick every type from one cluster", str(e.exception))
 
+    def test_load_types_may_differ_per_host(self):
+        # Growing a RUNNING experiment: keep the entries the existing hosts
+        # already have and append the new type, so Modify adds hosts rather
+        # than remapping the ones already provisioned.
+        nodes, _ = request_for(with_(num_lg_hosts=4,
+                                     load_hw_type="r650,r650,r6615,r6615"))
+        self.assertEqual(nodes["lg1"]["hw"], "r650")
+        self.assertEqual(nodes["lg2"]["hw"], "r650")
+        self.assertEqual(nodes["lg3"]["hw"], "r6615")
+        self.assertEqual(nodes["lg4"]["hw"], "r6615")
+
+    def test_fe_types_may_differ_per_host(self):
+        nodes, _ = request_for(with_(num_fe_hosts=3,
+                                     fe_hw_type="r650,r650,r6615"))
+        self.assertEqual(nodes["fe1"]["hw"], "r650")
+        self.assertEqual(nodes["fe3"]["hw"], "r6615")
+
+    def test_one_load_type_still_applies_to_every_host(self):
+        nodes, _ = request_for(with_(num_lg_hosts=3, load_hw_type="c6320"))
+        self.assertEqual({nodes["lg%d" % i]["hw"] for i in (1, 2, 3)},
+                         {"c6320"})
+
+    def test_a_load_list_of_the_wrong_length_is_refused(self):
+        with self.assertRaises(AssertionError) as e:
+            request_for(with_(num_lg_hosts=3, load_hw_type="r650,r6615"))
+        self.assertIn("one per host", str(e.exception))
+
+    def test_an_fe_list_of_the_wrong_length_is_refused(self):
+        with self.assertRaises(AssertionError) as e:
+            request_for(with_(num_fe_hosts=4, fe_hw_type="r650,r6615"))
+        self.assertIn("one per host", str(e.exception))
+
+    def test_a_load_list_crossing_clusters_is_refused(self):
+        with self.assertRaises(AssertionError) as e:
+            request_for(with_(num_lg_hosts=2,
+                              load_hw_type="r650,c6525-25g"))
+        self.assertIn("Pick every type from one cluster", str(e.exception))
+
+    def test_mixed_load_and_fe_lists_place_every_host(self):
+        # The 2026-09-07 growth case: an all-r650 testbed gaining r6615
+        # load and frontend hosts without touching the r650 ones.
+        nodes, _ = request_for(with_(num_db_hosts=3, num_fe_hosts=6,
+                                     num_lg_hosts=7,
+                                     storage_hw_type="r650",
+                                     load_hw_type="r650,r650,r650,r650,r650,"
+                                                  "r6615,r6615",
+                                     fe_hw_type="r650,r650,r650,r650,"
+                                                "r6615,r6615"))
+        self.assertEqual({nodes["db%d" % k]["hw"] for k in (1, 2, 3)},
+                         {"r650"})
+        self.assertEqual(nodes["lg5"]["hw"], "r650")
+        self.assertEqual(nodes["lg6"]["hw"], "r6615")
+        self.assertEqual(nodes["fe4"]["hw"], "r650")
+        self.assertEqual(nodes["fe6"]["hw"], "r6615")
+
     def test_load_type_can_be_set_alone(self):
         nodes, _ = request_for(with_(num_lg_hosts=1, load_hw_type="r7525"))
         self.assertEqual(nodes["db1"]["hw"], "c6420")

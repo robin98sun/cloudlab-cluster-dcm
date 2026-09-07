@@ -205,28 +205,43 @@ if not cfg["hw_type"]:
 # fe_hw_type falls back to the LOAD type, not the cluster-wide one: before
 # the split these two shared a field, so an unset fe type must still land
 # wherever load_hw_type points or an existing invocation changes meaning.
-if not cfg["fe_hw_type"]:
+# ...but only when the load type is a single name. Once load carries a
+# per-host list that list is sized to num_lg_hosts, and copying it into a
+# frontend tier of a different size is nonsense; fall through to hw_type.
+if not cfg["fe_hw_type"] and "," not in cfg["load_hw_type"]:
     cfg["fe_hw_type"] = cfg["load_hw_type"]
 for _g in ("storage_hw_type", "load_hw_type", "fe_hw_type", "ctl_hw_type"):
     if not cfg[_g]:
         cfg[_g] = cfg["hw_type"]
 
-# Storage hardware may be heterogeneous: a comma-separated list, one entry
-# per db host. A 3-node storage cluster is often only reachable by taking
-# the two of one type and the one of another that a cluster has free, and
-# refusing that mix would mean no storage tier at all. One entry applies to
-# every host, so a plain type name keeps its old meaning.
-cfg["storage_hw_types"] = [_t.strip()
-                           for _t in cfg["storage_hw_type"].split(",")
-                           if _t.strip()]
-if len(cfg["storage_hw_types"]) == 1:
-    cfg["storage_hw_types"] *= cfg["num_db_hosts"]
-elif len(cfg["storage_hw_types"]) != cfg["num_db_hosts"]:
-    pc.reportError(portal.ParameterError(
-        "storage_hw_type lists %d types for %d storage hosts. Give one "
-        "type for all of them, or exactly one per host."
-        % (len(cfg["storage_hw_types"]), cfg["num_db_hosts"]),
-        ["storage_hw_type", "num_db_hosts"]))
+# Storage, load and frontend hardware may each be heterogeneous: a
+# comma-separated list, one entry per host in that role. A tier is often
+# only reachable by taking the two of one type and the one of another that
+# a cluster has free, and refusing that mix would mean no tier at all.
+# It also lets a RUNNING experiment grow onto whatever is free now without
+# disturbing the hosts it already has: keep the existing entries and append
+# the new type, and the portal's Modify adds hosts rather than remapping
+# the ones already provisioned. One entry applies to every host in the
+# role, so a plain type name keeps its old meaning.
+
+
+def _expand_hw(field, count_field, role_label):
+    types = [_t.strip() for _t in cfg[field].split(",") if _t.strip()]
+    if len(types) == 1:
+        return types * cfg[count_field]
+    if len(types) != cfg[count_field]:
+        pc.reportError(portal.ParameterError(
+            "%s lists %d types for %d %s hosts. Give one type for all of "
+            "them, or exactly one per host."
+            % (field, len(types), cfg[count_field], role_label),
+            [field, count_field]))
+    return types
+
+
+cfg["storage_hw_types"] = _expand_hw("storage_hw_type", "num_db_hosts",
+                                     "storage")
+cfg["load_hw_types"] = _expand_hw("load_hw_type", "num_lg_hosts", "load")
+cfg["fe_hw_types"] = _expand_hw("fe_hw_type", "num_fe_hosts", "frontend")
 
 # Every type that PLACES A NODE must live in the same cluster. The check
 # runs over the three role types only: once every role has an explicit
@@ -234,12 +249,14 @@ elif len(cfg["storage_hw_types"]) != cfg["num_db_hosts"]:
 # source, already propagated above. Including it compared the default
 # (utah c6525-25g) against a fully-Clemson selection and refused a
 # request that named no utah node at all.
-_pairs = [(_f, cfg[_f])
-          for _f in ("load_hw_type", "fe_hw_type", "ctl_hw_type")]
-# Each storage entry is checked on its own: a heterogeneous storage tier is
-# fine, a storage tier straddling two aggregates is not.
-_pairs += [("storage_hw_type[%d]" % _i, _t)
-           for _i, _t in enumerate(cfg["storage_hw_types"])]
+_pairs = [("ctl_hw_type", cfg["ctl_hw_type"])]
+# Each entry is checked on its own: a heterogeneous tier is fine, a tier
+# straddling two aggregates is not.
+for _field, _key in (("storage_hw_type", "storage_hw_types"),
+                     ("load_hw_type", "load_hw_types"),
+                     ("fe_hw_type", "fe_hw_types")):
+    _pairs += [("%s[%d]" % (_field, _i), _t)
+               for _i, _t in enumerate(cfg[_key])]
 _seen = {}
 for _f, _t in _pairs:
     _cl = HW_CLUSTER.get(_t)
@@ -296,8 +313,7 @@ def make_node(name, role, extra_args="", hw=None):
     # Per-group hardware type. db hosts pass their own, since the storage
     # tier may be heterogeneous.
     if hw is None:
-        hw = {"lg": cfg["load_hw_type"], "fe": cfg["fe_hw_type"],
-              "ctl": cfg["ctl_hw_type"]}.get(role, cfg["hw_type"])
+        hw = cfg["ctl_hw_type"] if role == "ctl" else cfg["hw_type"]
     if hw:
         node.hardware_type = hw
     node.disk_image = cfg["disk_image"]
@@ -321,11 +337,11 @@ ctl = make_node("ctl1", "ctl",
 attach(ctl, expt_lan, "10.10.1.10")
 
 for i in range(1, cfg["num_lg_hosts"] + 1):
-    n = make_node("lg%d" % i, "lg")
+    n = make_node("lg%d" % i, "lg", hw=cfg["load_hw_types"][i - 1])
     attach(n, expt_lan, "10.10.1.%d" % (10 + i))
 
 for j in range(1, cfg["num_fe_hosts"] + 1):
-    n = make_node("fe%d" % j, "fe")
+    n = make_node("fe%d" % j, "fe", hw=cfg["fe_hw_types"][j - 1])
     attach(n, expt_lan, "10.10.1.%d" % (20 + j))
 
 for k in range(1, cfg["num_db_hosts"] + 1):
