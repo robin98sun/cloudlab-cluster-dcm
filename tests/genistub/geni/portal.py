@@ -10,8 +10,14 @@ class _Params: pass
 class Context:
     def __init__(self): self._defs = {}; self._errors = []; self.bound = _Params()
     def defineParameter(self, name, desc, ptype, default, legalValues=None,
-                        longDescription=None):
+                        longDescription=None, advanced=False, groupId=None):
+        # `advanced` and `groupId` are real geni-lib arguments; the stub
+        # accepted neither, so a profile using them ran on the portal and
+        # crashed here. A stub that rejects valid API is a test that fails
+        # for a reason the portal does not have.
         self._defs[name] = default
+        self._advanced = getattr(self, "_advanced", {})
+        self._advanced[name] = advanced
         # Record the choices so a test can check every hardware parameter
         # offers the same list -- the portal enforces legalValues, and a
         # parameter without them is a free-text box, not a dropdown.

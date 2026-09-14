@@ -14,13 +14,16 @@
 #                                     --fe-instances N]   (ctl only)
 set -euo pipefail
 
-ROLE="${1:?usage: bootstrap.sh <ctl|fe|db|lg> [opts]}"; shift || true
-FE_HOSTS=1; DB_HOSTS=1; LG_HOSTS=0; FE_INSTANCES=3
+ROLE="${1:?usage: bootstrap.sh <ctl|fe|db|lg|cm> [opts]}"; shift || true
+FE_HOSTS=1; DB_HOSTS=1; LG_HOSTS=0; FE_INSTANCES=3; CM_HOSTS=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --fe-hosts)     FE_HOSTS="$2";     shift 2 ;;
         --db-hosts)     DB_HOSTS="$2";     shift 2 ;;
         --lg-hosts)     LG_HOSTS="$2";     shift 2 ;;
+        # Custom hosts absorbed one at a time. ctl1 needs the
+        # count or its readiness wait finishes before they join.
+        --cm-hosts)     CM_HOSTS="$2";     shift 2 ;;
         --fe-instances) FE_INSTANCES="$2"; shift 2 ;;
         *) echo "unknown arg: $1" >&2; exit 2 ;;
     esac
@@ -218,7 +221,7 @@ PYFACTS
 # LAN, caught by S05).
 has_addr_in() { ip -o -4 addr show | awk '$4 ~ /^'"$1"'\./ {found=1} END {exit !found}'; }
 case "$ROLE" in
-    ctl|lg|db)
+    ctl|lg|db|cm)
         has_addr_in "10\.10\.1" || $SUDO ip route del 10.10.1.0/24 2>/dev/null || true
         has_addr_in "10\.10\.2" || {
             $SUDO ip route del 10.0.0.0/8 2>/dev/null || true
@@ -290,7 +293,7 @@ case "$ROLE" in
         $SUDO systemctl enable k3s >/dev/null 2>&1 || true
         $SUDO systemctl restart --no-block k3s
 
-        EXPECTED=$((1 + FE_HOSTS + DB_HOSTS + LG_HOSTS))
+        EXPECTED=$((1 + FE_HOSTS + DB_HOSTS + LG_HOSTS + CM_HOSTS))
         echo "waiting for $EXPECTED Ready nodes"
         for _ in $(seq 1 90); do
             READY=$(/usr/local/bin/k3s kubectl get nodes --no-headers 2>/dev/null \
@@ -309,7 +312,7 @@ case "$ROLE" in
         $SUDO mkdir -p /var/lib/rancher/k3s/server/manifests
         $SUDO cp "$STATE/testbed.yaml" /var/lib/rancher/k3s/server/manifests/testbed.yaml
         ;;
-    fe|db|lg)
+    fe|db|lg|cm)
         INSTALL_K3S_SKIP_DOWNLOAD=true INSTALL_K3S_SKIP_START=true \
         INSTALL_K3S_SKIP_ENABLE=true K3S_URL="$SERVER_URL" K3S_TOKEN="$TOKEN" \
         INSTALL_K3S_EXEC="agent --node-name $(hostname -s) --node-label testbed/role=${ROLE}-host" \

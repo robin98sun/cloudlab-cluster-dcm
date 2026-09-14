@@ -356,5 +356,74 @@ class NoDropdowns(unittest.TestCase):
             self.assertNotIn(name, ch, "%s should no longer exist" % name)
 
 
+class CustomHosts(unittest.TestCase):
+    """Ten slots for absorbing isolated idle machines, one at a time.
+
+    The point of the feature is that a RUNNING experiment grows onto
+    whatever a cluster happens to have free, so the properties that matter
+    are: an unfilled slot costs nothing, a filled one is one node, and a
+    node's address depends on its SLOT rather than on how many other slots
+    were filled -- otherwise adding cm4 would move cm3 and invalidate
+    every config that already named it.
+    """
+
+    def test_no_custom_hosts_by_default(self):
+        nodes, _ = request_for(THREE_DB)
+        self.assertEqual([n for n in nodes if n.startswith("cm")], [])
+
+    def test_a_filled_slot_adds_exactly_one_node(self):
+        nodes, _ = request_for(with_(cm1_hw_type="c6420"))
+        self.assertIn("cm1", nodes)
+        self.assertEqual(nodes["cm1"]["hw"], "c6420")
+        self.assertEqual(len([n for n in nodes if n.startswith("cm")]), 1)
+
+    def test_slots_may_be_filled_out_of_order_and_leave_gaps(self):
+        # cm2 unavailable when cm3 was grabbed: a gap is normal, not an error
+        nodes, _ = request_for(with_(cm1_hw_type="c6420", cm3_hw_type="c6320"))
+        self.assertEqual(sorted(n for n in nodes if n.startswith("cm")),
+                         ["cm1", "cm3"])
+
+    def test_address_follows_the_slot_not_the_fill_order(self):
+        # cm3 is 10.10.1.43 whether or not cm2 was ever filled
+        only3, _ = request_for(with_(cm3_hw_type="c6420"))
+        both, _ = request_for(with_(cm2_hw_type="c6320", cm3_hw_type="c6420"))
+        self.assertEqual(only3["cm3"]["lan"], both["cm3"]["lan"])
+        self.assertTrue(only3["cm3"]["lan"].endswith(".43"),
+                        only3["cm3"]["lan"])
+
+    def test_custom_hosts_may_each_be_a_different_type(self):
+        nodes, _ = request_for(with_(cm1_hw_type="c6420", cm2_hw_type="c6320",
+                                     cm3_hw_type="r650"))
+        self.assertEqual([nodes["cm%d" % m]["hw"] for m in (1, 2, 3)],
+                         ["c6420", "c6320", "r650"])
+
+    def test_a_custom_host_from_another_cluster_is_refused(self):
+        # The likeliest way to stitch an aggregate by accident: what is free
+        # is often free because it is in the other cluster.
+        with self.assertRaises(AssertionError):
+            request_for(with_(cm1_hw_type="c6525-25g"))
+
+    def test_custom_hosts_take_no_blockstore_by_default(self):
+        nodes, _ = request_for(with_(cm1_hw_type="c6420"))
+        self.assertEqual(nodes["cm1"]["store"], "-")
+
+    def test_custom_hosts_take_a_blockstore_when_asked(self):
+        nodes, _ = request_for(with_(cm1_hw_type="c6420", cm_data_size="100GB"))
+        self.assertNotEqual(nodes["cm1"]["store"], "-")
+
+    def test_all_ten_slots_can_be_filled(self):
+        kw = {"cm%d_hw_type" % m: "c6420" for m in range(1, 11)}
+        nodes, _ = request_for(with_(**kw))
+        self.assertEqual(len([n for n in nodes if n.startswith("cm")]), 10)
+        self.assertTrue(nodes["cm10"]["lan"].endswith(".50"),
+                        nodes["cm10"]["lan"])
+
+    def test_custom_hosts_do_not_disturb_the_named_tiers(self):
+        base, _ = request_for(THREE_DB)
+        grown, _ = request_for(with_(cm1_hw_type="c6420"))
+        for name, spec in base.items():
+            self.assertEqual(grown[name], spec, "%s moved" % name)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

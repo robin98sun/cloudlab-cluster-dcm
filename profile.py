@@ -180,6 +180,43 @@ pc.defineParameter(
                     "node's spare disks: if instantiation fails complaining "
                     "about space, lower it. Empty skips the blockstore (data "
                     "lands on /local -- smoke only).")
+# Ten CUSTOM HOST SLOTS. Each is one machine, requested only when its
+# hardware type is filled in, so a running experiment can absorb whatever
+# a cluster happens to have free -- one isolated idle host at a time --
+# without disturbing the nodes it already holds. Type a name into cm1,
+# Modify; later type one into cm2, Modify again. The portal adds the new
+# node and leaves the existing mapping alone.
+#
+# They are deliberately UNASSIGNED to a tier. A machine grabbed because it
+# was free is not yet known to be a load host or a storage host; it joins
+# k3s labelled testbed/role=cm-host and the experiment decides afterwards.
+# That is why these are ten separate fields rather than a count plus one
+# type: the whole point is that the slots are filled with DIFFERENT types,
+# at different times, as availability appears.
+for _m in range(1, 11):
+    pc.defineParameter(
+        "cm%d_hw_type" % _m,
+        "Custom host cm%d -- hardware type (empty = not requested)" % _m,
+        portal.ParameterType.STRING, "",
+        longDescription="One extra machine of this CloudLab type, named "
+                        "cm%d, address 10.10.1.%d. Empty leaves the slot "
+                        "unused. Must be from the same cluster as every "
+                        "other role: a LAN across aggregates is a stitched "
+                        "wide-area link. Unassigned to any tier -- it joins "
+                        "the cluster and waits to be given a job."
+                        % (_m, 40 + _m),
+        advanced=True)
+pc.defineParameter(
+    "cm_data_size", "Data blockstore per custom host (empty = none)",
+    portal.ParameterType.STRING, "",
+    longDescription="Applies to every cm host that is requested. Leave "
+                    "empty unless a custom host is meant to carry storage; "
+                    "an absorbed idle machine is more often wanted for "
+                    "cores. Same semantics as the storage-host blockstore: "
+                    "it gates what CloudLab carves and mounts at /mnt/data, "
+                    "not access to the disks, and it is checked at MAPPING "
+                    "time against the node's free space.",
+    advanced=True)
 pc.defineParameter(
     "client_bw", "Client link bandwidth (Kbps, 0 = native)",
     portal.ParameterType.INTEGER, 0)
@@ -192,12 +229,20 @@ params = pc.bindParameters()
 CONFIG_FIELDS = ("num_fe_hosts", "num_db_hosts", "num_lg_hosts",
                  "fe_instances", "hw_type", "storage_hw_type", "load_hw_type",
                  "fe_hw_type", "ctl_hw_type", "disk_image", "data_size", "client_bw",
-                 "backend_bw")
+                 "backend_bw", "cm_data_size") + tuple(
+                     "cm%d_hw_type" % _m for _m in range(1, 11))
 cfg = {f: getattr(params, f) for f in CONFIG_FIELDS}
 for _f in ("hw_type", "storage_hw_type", "load_hw_type", "fe_hw_type",
            "ctl_hw_type",
-           "disk_image", "data_size"):
+           "disk_image", "data_size", "cm_data_size") + tuple(
+               "cm%d_hw_type" % _m for _m in range(1, 11)):
     cfg[_f] = cfg[_f].strip()
+
+# The slots that were actually filled in, in order. A gap is not an error:
+# leaving cm2 empty and filling cm3 is exactly what happens when a type
+# stops being available between one Modify and the next.
+cfg["cm_hosts"] = [(_m, cfg["cm%d_hw_type" % _m]) for _m in range(1, 11)
+                   if cfg["cm%d_hw_type" % _m]]
 if not cfg["hw_type"]:
     cfg["hw_type"] = DEFAULT_HW
 # Every per-role type falls back to the cluster-wide one, so naming none of
@@ -257,6 +302,10 @@ for _field, _key in (("storage_hw_type", "storage_hw_types"),
                      ("fe_hw_type", "fe_hw_types")):
     _pairs += [("%s[%d]" % (_field, _i), _t)
                for _i, _t in enumerate(cfg[_key])]
+# A custom slot is the MOST likely place to stitch an aggregate by
+# accident: its whole purpose is to grab whatever is free, and what is
+# free is often free because it is in the other cluster.
+_pairs += [("cm%d_hw_type" % _m, _t) for _m, _t in cfg["cm_hosts"]]
 _seen = {}
 for _f, _t in _pairs:
     _cl = HW_CLUSTER.get(_t)
@@ -276,7 +325,7 @@ if len(_seen) > 1:
         % (len(_seen), "; ".join("%s: %s" % (c, ", ".join(v))
                                  for c, v in sorted(_seen.items()))),
         ["hw_type", "storage_hw_type", "load_hw_type", "fe_hw_type",
-         "ctl_hw_type"]))
+         "ctl_hw_type"] + ["cm%d_hw_type" % _m for _m, _ in cfg["cm_hosts"]]))
 
 if cfg["num_fe_hosts"] < 1:
     pc.reportError(portal.ParameterError(
@@ -332,8 +381,10 @@ def attach(node, lan, addr):
 
 ctl = make_node("ctl1", "ctl",
                 " --fe-hosts %d --db-hosts %d --lg-hosts %d --fe-instances %d"
+                " --cm-hosts %d"
                 % (cfg["num_fe_hosts"], cfg["num_db_hosts"],
-                   cfg["num_lg_hosts"], cfg["fe_instances"]))
+                   cfg["num_lg_hosts"], cfg["fe_instances"],
+                   len(cfg["cm_hosts"])))
 attach(ctl, expt_lan, "10.10.1.10")
 
 for i in range(1, cfg["num_lg_hosts"] + 1):
@@ -350,5 +401,17 @@ for k in range(1, cfg["num_db_hosts"] + 1):
     if cfg["data_size"]:
         bs = n.Blockstore("db%d-data" % k, "/mnt/data")
         bs.size = cfg["data_size"]
+
+# Custom hosts last, so their addresses never move when a tier grows: the
+# slot number fixes the address (cm3 is always 10.10.1.43), not the order
+# in which the slots were filled. An absorbed host that changed address
+# because another one was added later would invalidate every config that
+# already named it.
+for m, cm_hw in cfg["cm_hosts"]:
+    n = make_node("cm%d" % m, "cm", hw=cm_hw)
+    attach(n, expt_lan, "10.10.1.%d" % (40 + m))
+    if cfg["cm_data_size"]:
+        bs = n.Blockstore("cm%d-data" % m, "/mnt/data")
+        bs.size = cfg["cm_data_size"]
 
 pc.printRequestRSpec(request)
