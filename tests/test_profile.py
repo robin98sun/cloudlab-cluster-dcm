@@ -35,12 +35,19 @@ def request_for(params):
     if p.returncode != 0:
         raise AssertionError("profile failed: %s" % (p.stderr[-400:]))
     nodes, lans = {}, []
+    cmds = {}
     for line in p.stdout.splitlines():
         f = line.split()
+        if f[:1] == ["CMD"]:
+            cmds[f[1]] = " ".join(f[2:])
+            continue
         if len(f) >= 4 and f[0] not in ("node", "LANs:"):
             nodes[f[0]] = {"hw": f[1], "lan": f[2], "store": f[3]}
         elif line.strip().startswith("LANs:"):
             lans.append(line.split(":", 1)[1].strip())
+    for _n, _c in cmds.items():
+        if _n in nodes:
+            nodes[_n]["cmd"] = _c
     return nodes, lans
 
 
@@ -48,6 +55,51 @@ def with_(**kw):
     d = dict(THREE_DB)
     d.update(kw)
     return d
+
+
+class ControlPlanePlacement(unittest.TestCase):
+    """The control plane carries no measured load, so it need not own a
+    machine. These pin WHICH node runs it and how agents are told."""
+
+    def test_dedicated_is_the_default_and_unchanged(self):
+        nodes, _ = request_for(with_())
+        self.assertIn("ctl1", nodes)
+        self.assertIn("bootstrap.sh ctl", nodes["ctl1"]["cmd"])
+        self.assertIn("--server-node ctl1", nodes["ctl1"]["cmd"])
+        # workers point at it and do NOT run a server
+        self.assertIn("--server-node ctl1", nodes["db1"]["cmd"])
+        self.assertNotIn("--server ", nodes["db1"]["cmd"])
+
+    def test_co_located_puts_the_server_on_db1_and_drops_ctl1(self):
+        nodes, _ = request_for(with_(dedicated_ctl=False))
+        self.assertNotIn("ctl1", nodes)
+        cmd = nodes["db1"]["cmd"]
+        self.assertIn("bootstrap.sh db", cmd)      # keeps its own role
+        self.assertIn("--server", cmd)             # and runs the control plane
+        self.assertIn("--fe-hosts", cmd)           # with the control args
+        for other in ("db2", "db3", "fe1"):
+            self.assertIn("--server-node db1", nodes[other]["cmd"])
+            self.assertNotIn("--server ", nodes[other]["cmd"])
+
+    def test_co_location_falls_back_through_the_roles(self):
+        # No storage -> frontend; no frontend either -> load; none at all ->
+        # a dedicated ctl1, because an empty request answers nothing.
+        n, _ = request_for(with_(dedicated_ctl=False, num_db_hosts=0))
+        self.assertIn("--server", n["fe1"]["cmd"])
+        n, _ = request_for(with_(dedicated_ctl=False, num_db_hosts=0,
+                                 num_fe_hosts=0, num_lg_hosts=2))
+        self.assertIn("--server", n["lg1"]["cmd"])
+        n, _ = request_for(with_(dedicated_ctl=False, num_db_hosts=0,
+                                 num_fe_hosts=0, num_lg_hosts=0))
+        self.assertIn("ctl1", n)
+
+    def test_co_located_onto_a_custom_slot(self):
+        n, _ = request_for(with_(dedicated_ctl=False, num_db_hosts=0,
+                                 num_fe_hosts=0, num_lg_hosts=0,
+                                 cm3_hw_type="r6615", cm7_hw_type="r650"))
+        self.assertNotIn("ctl1", n)
+        self.assertIn("--server", n["cm3"]["cmd"])   # lowest slot wins
+        self.assertNotIn("--server ", n["cm7"]["cmd"])
 
 
 class Sizing(unittest.TestCase):
@@ -454,10 +506,20 @@ class CustomHosts(unittest.TestCase):
                         nodes["cm10"]["lan"])
 
     def test_custom_hosts_do_not_disturb_the_named_tiers(self):
+        # PLACEMENT is the invariant: absorbing a custom host must not move
+        # any existing node's address or hardware. It is deliberately not a
+        # claim about bootstrap arguments -- the control node is TOLD how
+        # many hosts of each role exist, so its --cm-hosts count is supposed
+        # to change from 0 to 1 here. Comparing the whole node dict made this
+        # test fail on exactly the thing that is meant to happen.
+        placement = lambda d: {k: v for k, v in d.items() if k != "cmd"}
         base, _ = request_for(THREE_DB)
         grown, _ = request_for(with_(cm1_hw_type="c6420"))
         for name, spec in base.items():
-            self.assertEqual(grown[name], spec, "%s moved" % name)
+            self.assertEqual(placement(grown[name]), placement(spec),
+                             "%s moved" % name)
+        self.assertIn("--cm-hosts 1", grown["ctl1"]["cmd"])
+        self.assertIn("--cm-hosts 0", base["ctl1"]["cmd"])
 
 
 if __name__ == "__main__":

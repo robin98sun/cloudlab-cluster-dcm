@@ -15,9 +15,19 @@
 set -euo pipefail
 
 ROLE="${1:?usage: bootstrap.sh <ctl|fe|db|lg|cm> [opts]}"; shift || true
+# The control plane does not have to own a machine. --server makes THIS node
+# run the k3s server while keeping its own role, label and hostname, so a
+# storage or frontend host can carry the control plane at no extra machine.
+# --server-node names whichever node is the server, so agents can find it;
+# it used to be the literal string "ctl1" in two places.
+IS_SERVER=0
+SERVER_NODE="ctl1"
 FE_HOSTS=1; DB_HOSTS=1; LG_HOSTS=0; FE_INSTANCES=3; CM_HOSTS=0
+[ "$ROLE" = ctl ] && IS_SERVER=1
 while [ $# -gt 0 ]; do
     case "$1" in
+        --server)       IS_SERVER=1;       shift 1 ;;
+        --server-node)  SERVER_NODE="$2";  shift 2 ;;
         --fe-hosts)     FE_HOSTS="$2";     shift 2 ;;
         --db-hosts)     DB_HOSTS="$2";     shift 2 ;;
         --lg-hosts)     LG_HOSTS="$2";     shift 2 ;;
@@ -245,9 +255,11 @@ esac
 # k3s cluster formation. All control-plane traffic rides CloudLab's control
 # network (default route), keeping the client/backend LANs clean. Measured
 # pods use hostNetwork, so flannel never touches the measured path.
-# Resolve ctl1 from the CloudLab manifest: hostname -f can be stale during
-# early boot, and /etc/hosts maps bare "ctl1" to an experiment LAN that db
-# hosts deliberately cannot reach. k3s traffic belongs on the control net.
+# Resolve the SERVER NODE from the CloudLab manifest: hostname -f can be stale
+# during early boot, and /etc/hosts maps the bare name to an experiment LAN
+# that db hosts deliberately cannot reach. k3s traffic belongs on the control
+# net. The name comes from --server-node, which is "ctl1" when the control
+# plane has its own machine and the co-located node's name when it does not.
 read -r CTL_NAME CTL_IP <<<"$(geni-get manifest 2>/dev/null | python3 -c '
 import sys, xml.etree.ElementTree as ET
 def t(e): return e.tag.split("}", 1)[-1]
@@ -256,24 +268,31 @@ try:
 except Exception:
     sys.exit(0)
 for n in root.iter():
-    if t(n) == "node" and n.get("client_id") == "ctl1":
+    if t(n) == "node" and n.get("client_id") == sys.argv[1]:
         for s in n.iter():
             if t(s) == "host" and s.get("name"):
                 print(s.get("name"), s.get("ipv4") or "")
                 sys.exit(0)
-' || true)"
+' "$SERVER_NODE" || true)"
 if [ -n "${CTL_NAME:-}" ] && getent hosts "$CTL_NAME" >/dev/null 2>&1; then
     SERVER_HOST="$CTL_NAME"
 elif [ -n "${CTL_IP:-}" ]; then
     SERVER_HOST="$CTL_IP"
 else
-    SERVER_HOST="ctl1.$(hostname -f | cut -d. -f2-)"
+    SERVER_HOST="$SERVER_NODE.$(hostname -f | cut -d. -f2-)"
 fi
 SERVER_URL="https://${SERVER_HOST}:6443"
 echo "k3s server endpoint: $SERVER_URL"
 
-case "$ROLE" in
-    ctl)
+# Server or agent is now decided by IS_SERVER, not by the role name. A node
+# with --server runs the control plane AND keeps its own role label, so the
+# manifests (which place pods by hostname) and any role selector both still
+# see it as the db/fe/lg/cm host it is.
+if [ "$IS_SERVER" = 1 ]; then
+        # Label with the node's own role. "ctl" keeps testbed/role=ctl for
+        # compatibility; a co-located node gets the -host label its role
+        # would have had as an agent.
+        if [ "$ROLE" = ctl ]; then SRV_LABEL="ctl"; else SRV_LABEL="${ROLE}-host"; fi
         # Static admin token (the join token, reused) so every agent can
         # write its own admin kubeconfig locally -- kubectl works on all
         # nodes with zero file distribution. Testbed trade-off, deliberate.
@@ -286,14 +305,21 @@ case "$ROLE" in
         INSTALL_K3S_EXEC="server --disable traefik --disable servicelb \
 --disable metrics-server --write-kubeconfig-mode 644 \
 --kube-apiserver-arg=token-auth-file=/etc/rancher/k3s/admin-token.csv \
---node-name $(hostname -s) --node-label testbed/role=ctl" \
+--node-name $(hostname -s) --node-label testbed/role=$SRV_LABEL" \
             $SUDO_E sh "$K3S_INSTALLER" >/dev/null
         # Never block bootstrap on service readiness; the wait loop below
         # (and smoke S10) verify convergence instead.
         $SUDO systemctl enable k3s >/dev/null 2>&1 || true
         $SUDO systemctl restart --no-block k3s
 
-        EXPECTED=$((1 + FE_HOSTS + DB_HOSTS + LG_HOSTS + CM_HOSTS))
+        # The +1 is a DEDICATED control node. When the control plane shares a
+        # machine there is no extra node to wait for, and counting one that
+        # will never appear would burn the whole 450 s wait every bring-up.
+        if [ "$ROLE" = ctl ]; then
+            EXPECTED=$((1 + FE_HOSTS + DB_HOSTS + LG_HOSTS + CM_HOSTS))
+        else
+            EXPECTED=$((FE_HOSTS + DB_HOSTS + LG_HOSTS + CM_HOSTS))
+        fi
         echo "waiting for $EXPECTED Ready nodes"
         for _ in $(seq 1 90); do
             READY=$(/usr/local/bin/k3s kubectl get nodes --no-headers 2>/dev/null \
@@ -311,8 +337,7 @@ case "$ROLE" in
             --out "$STATE/testbed.yaml"
         $SUDO mkdir -p /var/lib/rancher/k3s/server/manifests
         $SUDO cp "$STATE/testbed.yaml" /var/lib/rancher/k3s/server/manifests/testbed.yaml
-        ;;
-    fe|db|lg|cm)
+else
         INSTALL_K3S_SKIP_DOWNLOAD=true INSTALL_K3S_SKIP_START=true \
         INSTALL_K3S_SKIP_ENABLE=true K3S_URL="$SERVER_URL" K3S_TOKEN="$TOKEN" \
         INSTALL_K3S_EXEC="agent --node-name $(hostname -s) --node-label testbed/role=${ROLE}-host" \
@@ -362,10 +387,12 @@ KCFG
         kubectl delete secret -n "kube-system" \
             "$(hostname -s).node-password.k3s" --ignore-not-found \
             >/dev/null 2>&1 || true
-        ;;
-    *)
-        echo "unknown role: $ROLE" >&2; exit 2 ;;
-esac
+fi
+
+# An unrecognised role no longer aborts. It gets an agent like any other
+# worker, which is what a new role would want anyway, and the node label
+# carries whatever name was passed. Refusing here killed the bring-up of a
+# whole node over a name this script had not been taught yet.
 
 echo "$IMAGE_LAYER" | $SUDO tee "$STATE/boot.done" >/dev/null
 echo "=== bootstrap complete role=$ROLE at $(date -Is) ==="

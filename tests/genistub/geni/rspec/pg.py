@@ -28,5 +28,11 @@ class Request:
             addr = n.ifaces[0].addrs[0].addr if n.ifaces and n.ifaces[0].addrs else "-"
             bs = ", ".join("%s=%s" % (b.mount, b.size) for b in n.blockstores) or "-"
             print("  %-6s %-12s %-10s %s" % (n.name, n.hardware_type or "-", addr, bs))
+        # The bootstrap ARGUMENTS decide which node runs the control plane and
+        # how agents find it. They were invisible here, so the half of the
+        # profile that matters most at bring-up could not be tested at all.
+        for n in self.nodes:
+            for sv in n.services:
+                print("  CMD %s %s" % (n.name, sv.command))
         print("  LANs: %s" % ", ".join("%s(%d ifaces)" % (l.name, len(l.ifaces))
                                        for l in self.lans))

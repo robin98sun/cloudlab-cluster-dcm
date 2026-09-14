@@ -88,6 +88,25 @@ HW_CLUSTER = {
 pc = portal.Context()
 
 pc.defineParameter(
+    "dedicated_ctl", "Give the control plane its own machine",
+    portal.ParameterType.BOOLEAN, True,
+    longDescription="The control host runs the k3s server and generates the "
+                    "manifests. It carries no measured load -- the load "
+                    "generator only lands there when there are no lg hosts "
+                    "-- so on a small or scarce allocation a whole machine "
+                    "for it is a machine wasted. Uncheck and the control "
+                    "plane rides the first node that exists (db1, else fe1, "
+                    "else lg1, else the lowest-numbered custom host), which "
+                    "keeps its own role, hostname and pods and additionally "
+                    "runs the server. Nothing else changes: pods are placed "
+                    "by hostname, so the co-located host is scheduled "
+                    "exactly as it would have been. Leave it checked when "
+                    "the control plane should not compete for CPU with a "
+                    "measured tier -- a storage host running the apiserver "
+                    "is a storage host with a noisy neighbour, and this "
+                    "testbed measures storage.")
+
+pc.defineParameter(
     "num_fe_hosts", "Frontend hosts", portal.ParameterType.INTEGER, 10,
     longDescription="Each runs fe_instances FE+testbed pods. One host still "
                     "preserves the multi-upstream property, but front-tier "
@@ -255,7 +274,7 @@ pc.defineParameter(
 
 params = pc.bindParameters()
 
-CONFIG_FIELDS = ("num_fe_hosts", "num_db_hosts", "num_lg_hosts",
+CONFIG_FIELDS = ("dedicated_ctl", "num_fe_hosts", "num_db_hosts", "num_lg_hosts",
                  "fe_instances", "hw_type", "storage_hw_type", "load_hw_type",
                  "fe_hw_type", "ctl_hw_type", "disk_image", "data_size", "client_bw",
                  "backend_bw", "cm_data_size") + tuple(
@@ -426,24 +445,66 @@ def attach(node, lan, addr):
     lan.addInterface(iface)
 
 
-ctl = make_node("ctl1", "ctl",
-                " --fe-hosts %d --db-hosts %d --lg-hosts %d --fe-instances %d"
-                " --cm-hosts %d"
-                % (cfg["num_fe_hosts"], cfg["num_db_hosts"],
-                   cfg["num_lg_hosts"], cfg["fe_instances"],
-                   len(cfg["cm_hosts"])))
-attach(ctl, expt_lan, "10.10.1.10")
+# WHICH NODE RUNS THE CONTROL PLANE. It does not have to be its own machine:
+# the server carries no measured load, and every pod is placed by hostname
+# (gen_manifests.py), so a node that also runs the server is scheduled
+# exactly as it would have been. When it is not dedicated the role goes to
+# the first node that exists -- db1, else fe1, else lg1, else the
+# lowest-numbered custom slot -- and that node gets --server on top of its
+# own role. Agents find the server by name via --server-node, which used to
+# be the string "ctl1" hardcoded in bootstrap.sh.
+CTL_ARGS = (" --fe-hosts %d --db-hosts %d --lg-hosts %d --fe-instances %d"
+            " --cm-hosts %d"
+            % (cfg["num_fe_hosts"], cfg["num_db_hosts"],
+               cfg["num_lg_hosts"], cfg["fe_instances"],
+               len(cfg["cm_hosts"])))
+
+_first_cm = min([_m for _m, _ in cfg["cm_hosts"]], default=None)
+if cfg["dedicated_ctl"]:
+    SERVER_NODE = "ctl1"
+elif cfg["num_db_hosts"] > 0:
+    SERVER_NODE = "db1"
+elif cfg["num_fe_hosts"] > 0:
+    SERVER_NODE = "fe1"
+elif cfg["num_lg_hosts"] > 0:
+    SERVER_NODE = "lg1"
+elif _first_cm is not None:
+    SERVER_NODE = "cm%d" % _first_cm
+else:
+    # Nothing to share with. A dedicated ctl1 is the only way to produce a
+    # cluster at all here, and an empty request is not a useful answer to
+    # "put the control plane somewhere else".
+    SERVER_NODE = "ctl1"
+
+NODE_ARGS = " --server-node %s" % SERVER_NODE
+
+
+def role_args(name, own=""):
+    """Bootstrap arguments for one node: its own, plus the server flags when
+    this is the node carrying the control plane."""
+    args = own + NODE_ARGS
+    if name == SERVER_NODE and name != "ctl1":
+        args += " --server" + CTL_ARGS
+    return args
+
+
+if SERVER_NODE == "ctl1":
+    ctl = make_node("ctl1", "ctl", CTL_ARGS + NODE_ARGS)
+    attach(ctl, expt_lan, "10.10.1.10")
 
 for i in range(1, cfg["num_lg_hosts"] + 1):
-    n = make_node("lg%d" % i, "lg", hw=cfg["load_hw_types"][i - 1])
+    n = make_node("lg%d" % i, "lg", role_args("lg%d" % i),
+                  hw=cfg["load_hw_types"][i - 1])
     attach(n, expt_lan, "10.10.1.%d" % (10 + i))
 
 for j in range(1, cfg["num_fe_hosts"] + 1):
-    n = make_node("fe%d" % j, "fe", hw=cfg["fe_hw_types"][j - 1])
+    n = make_node("fe%d" % j, "fe", role_args("fe%d" % j),
+                  hw=cfg["fe_hw_types"][j - 1])
     attach(n, expt_lan, "10.10.1.%d" % (20 + j))
 
 for k in range(1, cfg["num_db_hosts"] + 1):
-    n = make_node("db%d" % k, "db", hw=cfg["storage_hw_types"][k - 1])
+    n = make_node("db%d" % k, "db", role_args("db%d" % k),
+                  hw=cfg["storage_hw_types"][k - 1])
     attach(n, expt_lan, "10.10.1.%d" % (30 + k))
     if cfg["data_size"]:
         bs = n.Blockstore("db%d-data" % k, "/mnt/data")
@@ -455,7 +516,7 @@ for k in range(1, cfg["num_db_hosts"] + 1):
 # because another one was added later would invalidate every config that
 # already named it.
 for m, cm_hw in cfg["cm_hosts"]:
-    n = make_node("cm%d" % m, "cm", hw=cm_hw)
+    n = make_node("cm%d" % m, "cm", role_args("cm%d" % m), hw=cm_hw)
     attach(n, expt_lan, "10.10.1.%d" % (40 + m))
     if cfg["cm_data_size"]:
         bs = n.Blockstore("cm%d-data" % m, "/mnt/data")
