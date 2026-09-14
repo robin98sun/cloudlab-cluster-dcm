@@ -92,7 +92,11 @@ pc.defineParameter(
     longDescription="Each runs fe_instances FE+testbed pods. One host still "
                     "preserves the multi-upstream property, but front-tier "
                     "throughput must scale with the load tier or it becomes "
-                    "the hidden ceiling. 10 per 3 storage hosts.")
+                    "the hidden ceiling -- 10 per 3 storage hosts is the ratio "
+                    "that held. ANY count is accepted, including 0, which "
+                    "places no frontend at all: the admission path then has "
+                    "nothing to run on. Useful for holding an allocation or "
+                    "exercising storage alone, not for a measurement.")
 pc.defineParameter(
     "num_db_hosts", "Storage hosts", portal.ParameterType.INTEGER, 1,
     longDescription="One replica pod per host. ANY count from 1 up is "
@@ -109,7 +113,9 @@ pc.defineParameter(
                     "tolerates one, so it costs a machine for nothing. 5 "
                     "tolerates two. In short the odd counts are the "
                     "efficient ones and the even counts are transitional; "
-                    "pick an even count deliberately, not by accident.")
+                    "pick an even count deliberately, not by accident. 0 is "
+                    "accepted too and places no storage, which leaves "
+                    "nothing to admit against.")
 pc.defineParameter(
     "num_lg_hosts", "Dedicated load-generator hosts",
     portal.ParameterType.INTEGER, 10,
@@ -125,7 +131,10 @@ pc.defineParameter(
     portal.ParameterType.INTEGER, 3,
     longDescription="Ports 8081, 8082, ... Three is the minimum for the "
                     "distributed property: several independent admission "
-                    "points enforcing one shared budget.")
+                    "points enforcing one shared budget -- so 1 or 2 still "
+                    "runs but measures something else, and 0 places no pods "
+                    "on frontend hosts that still get allocated. No count is "
+                    "refused.")
 pc.defineParameter(
     "hw_type", "Hardware type", portal.ParameterType.STRING, DEFAULT_HW,
     longDescription="Free text -- any CloudLab type name, whether or not it "
@@ -137,7 +146,13 @@ pc.defineParameter(
                     "machines before instantiating. One homogeneous type per "
                     "comparison series. Clemson: c6420, c6320, c8220, "
                     "c8220x, c4130, r650, r6615, r6525, r7525. Utah: "
-                    "c6525-25g, c6525-100g, c6620, d6515, d7615.")
+                    "c6525-25g, c6525-100g, c6620, d6515, d7615. MIXING TWO "
+                    "CLUSTERS IS ACCEPTED AND IS ALMOST ALWAYS WRONG: a LAN "
+                    "between aggregates is a stitched wide-area link, tens "
+                    "of ms RTT against ~0.1 ms locally, which silently "
+                    "changes every latency and every watermark measured "
+                    "here. Nothing blocks it; the numbers just stop meaning "
+                    "what they normally mean.")
 pc.defineParameter(
     "storage_hw_type", "Storage-host hardware type(s) (empty = same as above)",
     portal.ParameterType.STRING, "",
@@ -148,7 +163,10 @@ pc.defineParameter(
                     "singletons a cluster happens to have free -- e.g. "
                     "'r6525,r6525,r6515'. A single name applies to every db "
                     "host, which is what this field meant before it took a "
-                    "list. Any other count is refused. NVMe is preferred and "
+                    "list. A list SHORTER than the host count cycles -- two "
+                    "types across four hosts gives two of each -- and a "
+                    "longer one is truncated; neither is refused. NVMe is "
+                    "preferred and "
                     "SATA SSD is the fallback; spinning disk is not usable "
                     "here. Every entry must still be from the SAME cluster "
                     "as the other roles.")
@@ -282,16 +300,24 @@ for _g in ("storage_hw_type", "load_hw_type", "fe_hw_type", "ctl_hw_type"):
 
 
 def _expand_hw(field, count_field, role_label):
+    """One hardware type per host in a role. Never refuses a list length.
+
+    A short list CYCLES and a long one is truncated, so any count of types
+    maps onto any count of hosts. This used to be an error, which meant that
+    changing a host count without also editing the type list was a form
+    rejection rather than a sensible request. Cycling also makes the common
+    incremental case work by itself: 'r6615,r6525' across four hosts gives
+    two of each.
+
+    It must not raise either. The refusal was the only thing standing between
+    a short list and an IndexError at node-build time, so removing the one
+    without fixing the other would turn a clear message into a traceback.
+    """
     types = [_t.strip() for _t in cfg[field].split(",") if _t.strip()]
-    if len(types) == 1:
-        return types * cfg[count_field]
-    if len(types) != cfg[count_field]:
-        pc.reportError(portal.ParameterError(
-            "%s lists %d types for %d %s hosts. Give one type for all of "
-            "them, or exactly one per host."
-            % (field, len(types), cfg[count_field], role_label),
-            [field, count_field]))
-    return types
+    count = max(cfg[count_field], 0)
+    if not types:
+        return []
+    return [types[_i % len(types)] for _i in range(count)]
 
 
 cfg["storage_hw_types"] = _expand_hw("storage_hw_type", "num_db_hosts",
@@ -324,26 +350,30 @@ for _f, _t in _pairs:
         _seen.setdefault(_cl, []).append("%s=%s" % (_f, _t))
 # Keep the unused fallback consistent with the chosen cluster, so any
 # future role that falls back to hw_type cannot stitch a wide-area LAN.
+# A request spanning two aggregates is NO LONGER REFUSED. It is still a bad
+# idea -- the LAN becomes a stitched wide-area link, tens of ms RTT against
+# ~0.1 ms locally, which silently changes every latency this testbed measures
+# -- and that warning now lives in the hardware fields' descriptions instead
+# of in a block. Deciding it is the operator's job.
 if len(_seen) == 1:
     _used_cl = next(iter(_seen))
     if HW_CLUSTER.get(cfg["hw_type"]) not in (None, _used_cl):
-        cfg["hw_type"] = cfg["storage_hw_types"][0]
-if len(_seen) > 1:
-    pc.reportError(portal.ParameterError(
-        "hardware types span %d CloudLab clusters (%s). A LAN between "
-        "aggregates is a stitched wide-area link, tens of ms RTT against "
-        "~0.1ms locally. Pick every type from one cluster."
-        % (len(_seen), "; ".join("%s: %s" % (c, ", ".join(v))
-                                 for c, v in sorted(_seen.items()))),
-        ["hw_type", "storage_hw_type", "load_hw_type", "fe_hw_type",
-         "ctl_hw_type"] + ["cm%d_hw_type" % _m for _m, _ in cfg["cm_hosts"]]))
+        # Any type from the chosen cluster will do; storage is not guaranteed
+        # to have one now that a role may legally have zero hosts.
+        _fallbacks = (cfg["storage_hw_types"] + cfg["fe_hw_types"]
+                      + cfg["load_hw_types"]
+                      + [_t for _, _t in cfg["cm_hosts"]])
+        _fallbacks = [_t for _t in _fallbacks
+                      if HW_CLUSTER.get(_t) == _used_cl]
+        if _fallbacks:
+            cfg["hw_type"] = _fallbacks[0]
 
-if cfg["num_fe_hosts"] < 1:
-    pc.reportError(portal.ParameterError(
-        "At least one frontend host is required.", ["num_fe_hosts"]))
-if cfg["num_db_hosts"] < 1:
-    pc.reportError(portal.ParameterError(
-        "At least one storage host is required.", ["num_db_hosts"]))
+# NO COUNT IS REFUSED, including zero. Every role loop is range(1, n + 1), so
+# a zero or negative count simply places no nodes of that role, and ctl1 is
+# always present -- the request is never empty. A partial testbed is a normal
+# thing to want: storage hosts alone to seed a volume, frontends alone to
+# check pod placement, or a bare ctl1 to hold an allocation while machines
+# free up. What each count costs is described on the field itself.
 # Even storage counts are NO LONGER REFUSED. The old rule rejected exactly 2
 # on the grounds that it tolerates no failures, which is true -- and it also
 # made it impossible to GROW a tier one host at a time, which is how a tier
@@ -357,9 +387,6 @@ if cfg["num_db_hosts"] < 1:
 # The arithmetic is now in the field's longDescription instead, where the
 # portal shows it: an even count buys no fault tolerance over the odd count
 # below it. That is a cost to accept knowingly, not a configuration to block.
-if cfg["fe_instances"] < 1:
-    pc.reportError(portal.ParameterError(
-        "At least one FE pod per host.", ["fe_instances"]))
 pc.verifyParameters()
 
 request = pc.makeRequestRSpec()

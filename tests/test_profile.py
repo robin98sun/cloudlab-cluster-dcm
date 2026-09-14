@@ -81,20 +81,27 @@ class Sizing(unittest.TestCase):
         self.assertEqual([nodes["db%d" % k]["hw"] for k in range(1, 6)],
                          ["r6615", "r6525", "r6615", "c6420", "r650"])
 
-    def test_storage_type_list_length_is_still_checked(self):
-        # Relaxing the COUNT must not relax the pairing: a list that does
-        # not match the host count is still a mistake, not a growth step.
-        with self.assertRaises(AssertionError) as e:
-            request_for(with_(num_db_hosts=4, storage_hw_type="r6615,r6525"))
-        self.assertIn("storage_hw_type", str(e.exception))
+    def test_a_storage_list_shorter_than_the_count_cycles(self):
+        # Two types over four hosts, alternating. Formerly refused; the
+        # refusal was also the only thing preventing an IndexError at
+        # node-build time, so _expand_hw had to become total, not just
+        # permissive.
+        nodes, _ = request_for(with_(num_db_hosts=4,
+                                     storage_hw_type="r6615,r6525"))
+        self.assertEqual([nodes["db%d" % k]["hw"] for k in (1, 2, 3, 4)],
+                         ["r6615", "r6525", "r6615", "r6525"])
 
-    def test_zero_storage_hosts_are_refused(self):
-        with self.assertRaises(AssertionError):
-            request_for(with_(num_db_hosts=0))
+    def test_zero_storage_hosts_place_no_storage(self):
+        nodes, _ = request_for(with_(num_db_hosts=0))
+        self.assertNotIn("db1", nodes)
+        self.assertIn("ctl1", nodes)
 
-    def test_zero_frontend_hosts_are_refused(self):
-        with self.assertRaises(AssertionError):
-            request_for(with_(num_fe_hosts=0))
+    def test_zero_frontend_hosts_place_no_frontend(self):
+        nodes, lans = request_for(with_(num_fe_hosts=0))
+        self.assertNotIn("fe1", nodes)
+        self.assertIn("ctl1", nodes)
+        self.assertIn("db1", nodes)
+        self.assertEqual(len(lans), 1)
 
     def test_host_counts_are_honoured(self):
         nodes, lans = request_for({"hw_type": "c6420", "num_db_hosts": 3,
@@ -156,23 +163,22 @@ class PerRoleHardware(unittest.TestCase):
         self.assertEqual({nodes["db%d" % k]["hw"] for k in (1, 2, 3)},
                          {"c6320"})
 
-    def test_a_storage_list_of_the_wrong_length_is_refused(self):
-        with self.assertRaises(AssertionError) as e:
-            request_for(with_(num_db_hosts=3,
-                              storage_hw_type="r6525,r6615"))
-        self.assertIn("one per host", str(e.exception))
+    def test_a_short_storage_list_cycles_to_fill_the_hosts(self):
+        nodes, _ = request_for(with_(num_db_hosts=3,
+                                     storage_hw_type="r6525,r6615"))
+        self.assertEqual([nodes["db%d" % k]["hw"] for k in (1, 2, 3)],
+                         ["r6525", "r6615", "r6525"])
 
     def test_storage_list_entries_are_trimmed(self):
         nodes, _ = request_for(with_(num_db_hosts=3,
                                      storage_hw_type=" r6525 , r6525 , r6615 "))
         self.assertEqual(nodes["db3"]["hw"], "r6615")
 
-    def test_a_storage_list_crossing_clusters_is_refused(self):
-        # Heterogeneous is fine; straddling two aggregates is not.
-        with self.assertRaises(AssertionError) as e:
-            request_for(with_(num_db_hosts=3,
-                              storage_hw_type="r6525,r6525,c6525-25g"))
-        self.assertIn("Pick every type from one cluster", str(e.exception))
+    def test_a_storage_list_crossing_clusters_is_accepted(self):
+        nodes, _ = request_for(with_(num_db_hosts=3,
+                                     storage_hw_type="r6525,r6525,c6525-25g"))
+        self.assertEqual([nodes["db%d" % k]["hw"] for k in (1, 2, 3)],
+                         ["r6525", "r6525", "c6525-25g"])
 
     def test_load_types_may_differ_per_host(self):
         # Growing a RUNNING experiment: keep the entries the existing hosts
@@ -196,21 +202,25 @@ class PerRoleHardware(unittest.TestCase):
         self.assertEqual({nodes["lg%d" % i]["hw"] for i in (1, 2, 3)},
                          {"c6320"})
 
-    def test_a_load_list_of_the_wrong_length_is_refused(self):
-        with self.assertRaises(AssertionError) as e:
-            request_for(with_(num_lg_hosts=3, load_hw_type="r650,r6615"))
-        self.assertIn("one per host", str(e.exception))
+    def test_a_short_load_list_cycles_to_fill_the_hosts(self):
+        # Two types across three hosts: r650, r6615, r650.
+        nodes, _ = request_for(with_(num_lg_hosts=3,
+                                     load_hw_type="r650,r6615"))
+        self.assertEqual([nodes["lg%d" % i]["hw"] for i in (1, 2, 3)],
+                         ["r650", "r6615", "r650"])
 
-    def test_an_fe_list_of_the_wrong_length_is_refused(self):
-        with self.assertRaises(AssertionError) as e:
-            request_for(with_(num_fe_hosts=4, fe_hw_type="r650,r6615"))
-        self.assertIn("one per host", str(e.exception))
+    def test_a_long_fe_list_is_truncated_to_the_host_count(self):
+        nodes, _ = request_for(with_(num_fe_hosts=2,
+                                     fe_hw_type="r650,r6615,c6420,r7525"))
+        self.assertEqual([nodes["fe1"]["hw"], nodes["fe2"]["hw"]],
+                         ["r650", "r6615"])
+        self.assertNotIn("fe3", nodes)
 
-    def test_a_load_list_crossing_clusters_is_refused(self):
-        with self.assertRaises(AssertionError) as e:
-            request_for(with_(num_lg_hosts=2,
-                              load_hw_type="r650,c6525-25g"))
-        self.assertIn("Pick every type from one cluster", str(e.exception))
+    def test_a_load_list_crossing_clusters_is_accepted(self):
+        nodes, _ = request_for(with_(num_lg_hosts=2,
+                                     load_hw_type="r650,c6525-25g"))
+        self.assertEqual([nodes["lg1"]["hw"], nodes["lg2"]["hw"]],
+                         ["r650", "c6525-25g"])
 
     def test_mixed_load_and_fe_lists_place_every_host(self):
         # The 2026-09-07 growth case: an all-r650 testbed gaining r6615
@@ -324,15 +334,14 @@ class SingleCluster(unittest.TestCase):
         self.assertEqual(nodes["fe1"]["hw"], "r7525")
         self.assertEqual(nodes["ctl1"]["hw"], "c6420")
 
-    def test_types_split_across_clusters_are_refused(self):
-        with self.assertRaises(AssertionError) as e:
-            request_for(with_(storage_hw_type="c6525-25g"))
-        self.assertIn("Pick every type from one cluster", str(e.exception))
+    def test_types_split_across_clusters_are_accepted(self):
+        nodes, _ = request_for(with_(storage_hw_type="c6525-25g"))
+        self.assertEqual(nodes["db1"]["hw"], "c6525-25g")
 
-    def test_any_group_crossing_clusters_is_refused(self):
-        with self.assertRaises(AssertionError) as e:
-            request_for(with_(num_lg_hosts=1, load_hw_type="c6525-25g"))
-        self.assertIn("Pick every type from one cluster", str(e.exception))
+    def test_one_group_in_another_cluster_is_accepted(self):
+        nodes, _ = request_for(with_(num_lg_hosts=1,
+                                     load_hw_type="c6525-25g"))
+        self.assertEqual(nodes["lg1"]["hw"], "c6525-25g")
 
     def test_an_unknown_type_is_not_assumed_remote(self):
         # a new hardware type is new, not necessarily elsewhere
@@ -421,11 +430,13 @@ class CustomHosts(unittest.TestCase):
         self.assertEqual([nodes["cm%d" % m]["hw"] for m in (1, 2, 3)],
                          ["c6420", "c6320", "r650"])
 
-    def test_a_custom_host_from_another_cluster_is_refused(self):
-        # The likeliest way to stitch an aggregate by accident: what is free
-        # is often free because it is in the other cluster.
-        with self.assertRaises(AssertionError):
-            request_for(with_(cm1_hw_type="c6525-25g"))
+    def test_a_custom_host_from_another_cluster_is_accepted(self):
+        # Was refused. Stitching an aggregate is still the likeliest way to
+        # ruin a measurement by accident -- what is free is often free
+        # because it is in the other cluster -- but it is now the operator's
+        # call, and the warning lives on the hardware fields.
+        nodes, _ = request_for(with_(cm1_hw_type="c6525-25g"))
+        self.assertEqual(nodes["cm1"]["hw"], "c6525-25g")
 
     def test_custom_hosts_take_no_blockstore_by_default(self):
         nodes, _ = request_for(with_(cm1_hw_type="c6420"))
