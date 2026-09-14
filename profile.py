@@ -459,7 +459,10 @@ CTL_ARGS = (" --fe-hosts %d --db-hosts %d --lg-hosts %d --fe-instances %d"
                cfg["num_lg_hosts"], cfg["fe_instances"],
                len(cfg["cm_hosts"])))
 
-_first_cm = min([_m for _m, _ in cfg["cm_hosts"]], default=None)
+# min(..., default=) is Python 3.4+ and the portal runs this file under
+# PYTHON 2. Spelled the long way on purpose.
+_cm_slots = [_m for _m, _ in cfg["cm_hosts"]]
+_first_cm = min(_cm_slots) if _cm_slots else None
 if cfg["dedicated_ctl"]:
     SERVER_NODE = "ctl1"
 elif cfg["num_db_hosts"] > 0:

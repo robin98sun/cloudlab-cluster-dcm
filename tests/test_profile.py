@@ -17,6 +17,7 @@ import os
 import subprocess
 import sys
 import unittest
+from shutil import which as _which
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -100,6 +101,74 @@ class ControlPlanePlacement(unittest.TestCase):
         self.assertNotIn("ctl1", n)
         self.assertIn("--server", n["cm3"]["cmd"])   # lowest slot wins
         self.assertNotIn("--server ", n["cm7"]["cmd"])
+
+
+class PythonTwo(unittest.TestCase):
+    """The portal runs this profile under PYTHON 2. These tests exist because
+    the suite did not, and a `min(..., default=None)` shipped that parsed
+    fine, passed all 55 tests under python3, and made the profile unreadable
+    on CloudLab with `TypeError: min() got unexpected keyword argument`.
+
+    Running the profile under python3 only can never catch that class of bug.
+    """
+
+    PY2 = next((p for p in ("python2", "python2.7",
+                            "/usr/bin/python2.7",
+                            os.path.expanduser(
+                                "~/Dev/Libraries/pypy2/bin/python2"))
+                if _which(p)), None)
+
+    def test_profile_executes_under_python2(self):
+        if not self.PY2:
+            self.skipTest("no python2 here; the static scan below still runs")
+        for params in ({}, {"dedicated_ctl": False},
+                       {"dedicated_ctl": False, "num_db_hosts": 0,
+                        "num_fe_hosts": 0, "num_lg_hosts": 0},
+                       {"num_db_hosts": 4, "storage_hw_type": "r6615,r6525"}):
+            env = dict(os.environ, PYTHONPATH=STUB,
+                       PROFILE_PARAMS=json.dumps(params))
+            p = subprocess.run([self.PY2, os.path.join(ROOT, "profile.py")],
+                               capture_output=True, text=True, env=env,
+                               timeout=60)
+            self.assertEqual(p.returncode, 0,
+                             "py2 failed for %s:\n%s" % (params, p.stderr[-400:]))
+
+    def test_no_python3_only_constructs(self):
+        # Runs everywhere, including machines with no python2 at all. Each
+        # pattern is something that parses or passes under python3 and breaks
+        # under the interpreter the portal actually uses.
+        #
+        # COMMENTS AND DOCSTRINGS ARE STRIPPED FIRST. The first version of
+        # this test flagged its own explanatory comment about
+        # min(..., default=) -- a scanner that cannot tell code from prose
+        # reports the fix as the bug.
+        import io as _io
+        import re as _re
+        import tokenize as _tok
+
+        with open(os.path.join(ROOT, "profile.py")) as fh:
+            src = fh.read()
+        pieces = []
+        for tk in _tok.generate_tokens(_io.StringIO(src).readline):
+            if tk.type in (_tok.COMMENT, _tok.STRING):
+                continue
+            pieces.append(tk.string)
+        code = " ".join(pieces)
+
+        for label, pat in (
+                ("min/max with default=", r"\b(?:min|max)\s*\([^)]*\bdefault\s*="),
+                ("walrus :=", r":="),
+                ("nonlocal", r"\bnonlocal\b"),
+                ("subprocess.run", r"\bsubprocess\s*\.\s*run\b"),
+                ("yield from", r"\byield\s+from\b"),
+        ):
+            m = _re.search(pat, code)
+            self.assertIsNone(m, "python3-only construct in profile.py (%s)"
+                                 % label)
+        # f-strings are a syntax error under py2, so a successful py2 compile
+        # covers them; check the source text anyway for a clearer message.
+        self.assertIsNone(_re.search(r"""\bf["']""", src),
+                          "f-string in profile.py; the portal runs python2")
 
 
 class Sizing(unittest.TestCase):
