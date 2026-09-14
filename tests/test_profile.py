@@ -59,10 +59,34 @@ class Sizing(unittest.TestCase):
         self.assertNotIn("db2", nodes)
         self.assertEqual(len(lans), 1)
 
-    def test_two_storage_hosts_are_refused(self):
+    def test_two_storage_hosts_are_allowed_so_a_tier_can_grow(self):
+        # Formerly refused, on the correct observation that 2 tolerates no
+        # failures. But refusing it also made 1 -> 2 -> 3 impossible, and
+        # growing a tier one free machine at a time is the whole reason
+        # storage_hw_type takes a list. The arithmetic now lives in the
+        # field description; the count is the operator's to choose.
+        nodes, lans = request_for(with_(num_db_hosts=2))
+        self.assertIn("db1", nodes)
+        self.assertIn("db2", nodes)
+        self.assertNotIn("db3", nodes)
+        self.assertEqual(len(lans), 1)
+
+    def test_any_storage_count_is_allowed_and_may_be_heterogeneous(self):
+        # Five hosts of four different types: the case the portal form
+        # blocked, and the one an operator hits when absorbing whatever a
+        # cluster has free.
+        nodes, _ = request_for(with_(
+            num_db_hosts=5,
+            storage_hw_type="r6615,r6525,r6615,c6420,r650"))
+        self.assertEqual([nodes["db%d" % k]["hw"] for k in range(1, 6)],
+                         ["r6615", "r6525", "r6615", "c6420", "r650"])
+
+    def test_storage_type_list_length_is_still_checked(self):
+        # Relaxing the COUNT must not relax the pairing: a list that does
+        # not match the host count is still a mistake, not a growth step.
         with self.assertRaises(AssertionError) as e:
-            request_for(with_(num_db_hosts=2))
-        self.assertIn("Two storage hosts", str(e.exception))
+            request_for(with_(num_db_hosts=4, storage_hw_type="r6615,r6525"))
+        self.assertIn("storage_hw_type", str(e.exception))
 
     def test_zero_storage_hosts_are_refused(self):
         with self.assertRaises(AssertionError):

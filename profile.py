@@ -95,10 +95,21 @@ pc.defineParameter(
                     "the hidden ceiling. 10 per 3 storage hosts.")
 pc.defineParameter(
     "num_db_hosts", "Storage hosts", portal.ParameterType.INTEGER, 1,
-    longDescription="One replica pod per host. 1 is a complete, useful "
-                    "single-node testbed; 3 gives a Raft majority that "
-                    "tolerates one failure. 2 is refused: it survives no "
-                    "failures at all, like 1, but with twice the surface.")
+    longDescription="One replica pod per host. ANY count from 1 up is "
+                    "accepted, including even ones, so a storage tier can be "
+                    "assembled from isolated free machines one at a time. "
+                    "The Raft arithmetic, so the cost of each choice is "
+                    "visible rather than enforced: N hosts need a majority "
+                    "of N//2+1 and therefore tolerate (N-1)//2 failures. 1 "
+                    "tolerates none and is a complete, useful single-node "
+                    "testbed. 2 also tolerates none -- the majority is 2, so "
+                    "either host failing stops writes -- which buys nothing "
+                    "over 1 except replication surface, and is worth running "
+                    "only while on the way to 3. 3 tolerates one. 4 also "
+                    "tolerates one, so it costs a machine for nothing. 5 "
+                    "tolerates two. In short the odd counts are the "
+                    "efficient ones and the even counts are transitional; "
+                    "pick an even count deliberately, not by accident.")
 pc.defineParameter(
     "num_lg_hosts", "Dedicated load-generator hosts",
     portal.ParameterType.INTEGER, 10,
@@ -333,10 +344,19 @@ if cfg["num_fe_hosts"] < 1:
 if cfg["num_db_hosts"] < 1:
     pc.reportError(portal.ParameterError(
         "At least one storage host is required.", ["num_db_hosts"]))
-if cfg["num_db_hosts"] == 2:
-    pc.reportError(portal.ParameterError(
-        "Two storage hosts cannot form a useful Raft majority. Use 1 (smoke) "
-        "or 3.", ["num_db_hosts"]))
+# Even storage counts are NO LONGER REFUSED. The old rule rejected exactly 2
+# on the grounds that it tolerates no failures, which is true -- and it also
+# made it impossible to GROW a tier one host at a time, which is how a tier
+# gets built out of whatever a cluster happens to have free. Going 1 -> 3 in
+# one step needs two matching machines to appear at once; going 1 -> 2 -> 3
+# needs one at a time, and the profile already supports exactly that for
+# hardware types (see _expand_hw, which exists so a running experiment can
+# absorb a free host without remapping the ones it has). Refusing the count
+# while supporting the growth was the two halves disagreeing.
+#
+# The arithmetic is now in the field's longDescription instead, where the
+# portal shows it: an even count buys no fault tolerance over the odd count
+# below it. That is a cost to accept knowingly, not a configuration to block.
 if cfg["fe_instances"] < 1:
     pc.reportError(portal.ParameterError(
         "At least one FE pod per host.", ["fe_instances"]))
