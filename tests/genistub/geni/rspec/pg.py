@@ -23,11 +23,16 @@ class Request:
     def RawPC(self, name): n = RawPC(name); self.nodes.append(n); return n
     def LAN(self, name): l = LAN(name); self.lans.append(l); return l
     def dump(self):
-        print("  %-6s %-12s %-10s %s" % ("node", "hardware", "lan addr", "blockstore"))
+        print("  %-6s %-12s %-10s %-22s %s"
+              % ("node", "hardware", "lan addr", "blockstore", "image"))
         for n in self.nodes:
             addr = n.ifaces[0].addrs[0].addr if n.ifaces and n.ifaces[0].addrs else "-"
             bs = ", ".join("%s=%s" % (b.mount, b.size) for b in n.blockstores) or "-"
-            print("  %-6s %-12s %-10s %s" % (n.name, n.hardware_type or "-", addr, bs))
+            # The image is per NODE and a wrong one is a MAPPER refusal of the
+            # whole topology, before any node boots. It was invisible here.
+            print("  %-6s %-12s %-10s %-22s %s"
+                  % (n.name, n.hardware_type or "-", addr, bs,
+                     n.disk_image or "-"))
         # The bootstrap ARGUMENTS decide which node runs the control plane and
         # how agents find it. They were invisible here, so the half of the
         # profile that matters most at bring-up could not be tested at all.

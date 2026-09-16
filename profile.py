@@ -210,6 +210,19 @@ pc.defineParameter(
     portal.ParameterType.STRING, "",
     longDescription="Hardware for ctl1.")
 pc.defineParameter(
+    "alt_disk_image", "Disk image for hosts the golden image cannot boot",
+    portal.ParameterType.STRING, "",
+    longDescription="A CloudLab image is bound to the hardware types it was "
+                    "built for, and the golden image was baked on c6525-25g "
+                    "at Utah. Ask for a custom host of a type it was not "
+                    "built for and the MAPPER refuses the whole topology -- "
+                    "'No possible mapping for cm4 / OS ... does not run on "
+                    "this hardware type!' -- before anything boots, so no "
+                    "log on any node explains it. Put a stock image here "
+                    "(BASE_IMAGE in the source) and only the hosts that need "
+                    "it use it, paying the bake at boot. Empty means every "
+                    "node uses the image below.")
+pc.defineParameter(
     "disk_image", "Disk image URN", portal.ParameterType.STRING, GOLDEN_IMAGE,
     longDescription="Defaults to the golden image (~15-minute redeploy). Use "
                     "BASE_IMAGE from the profile source to rebuild from "
@@ -277,12 +290,12 @@ params = pc.bindParameters()
 CONFIG_FIELDS = ("dedicated_ctl", "num_fe_hosts", "num_db_hosts", "num_lg_hosts",
                  "fe_instances", "hw_type", "storage_hw_type", "load_hw_type",
                  "fe_hw_type", "ctl_hw_type", "disk_image", "data_size", "client_bw",
-                 "backend_bw", "cm_data_size") + tuple(
+                 "backend_bw", "alt_disk_image", "cm_data_size") + tuple(
                      "cm%d_hw_type" % _m for _m in range(1, 11))
 cfg = {f: getattr(params, f) for f in CONFIG_FIELDS}
 for _f in ("hw_type", "storage_hw_type", "load_hw_type", "fe_hw_type",
            "ctl_hw_type",
-           "disk_image", "data_size", "cm_data_size") + tuple(
+           "disk_image", "alt_disk_image", "data_size", "cm_data_size") + tuple(
                "cm%d_hw_type" % _m for _m in range(1, 11)):
     cfg[_f] = cfg[_f].strip()
 
@@ -423,7 +436,7 @@ if cfg["client_bw"] > 0:
 # is a no-op: there is no second LAN any more.
 
 
-def make_node(name, role, extra_args="", hw=None):
+def make_node(name, role, extra_args="", hw=None, image=None):
     node = request.RawPC(name)
     # Per-group hardware type. db hosts pass their own, since the storage
     # tier may be heterogeneous.
@@ -431,7 +444,11 @@ def make_node(name, role, extra_args="", hw=None):
         hw = cfg["ctl_hw_type"] if role == "ctl" else cfg["hw_type"]
     if hw:
         node.hardware_type = hw
-    node.disk_image = cfg["disk_image"]
+    # Per-node image, for the same reason hardware is per-node: a
+    # heterogeneous allocation may include a type the golden image was never
+    # built for, and that is a MAPPER refusal of the whole topology rather
+    # than a failure on any node.
+    node.disk_image = image or cfg["disk_image"]
     node.addService(pg.Execute(
         shell="bash",
         command="bash /local/repository/cloudlab/bootstrap.sh %s%s"
@@ -519,7 +536,8 @@ for k in range(1, cfg["num_db_hosts"] + 1):
 # because another one was added later would invalidate every config that
 # already named it.
 for m, cm_hw in cfg["cm_hosts"]:
-    n = make_node("cm%d" % m, "cm", role_args("cm%d" % m), hw=cm_hw)
+    n = make_node("cm%d" % m, "cm", role_args("cm%d" % m), hw=cm_hw,
+                  image=cfg["alt_disk_image"] or None)
     attach(n, expt_lan, "10.10.1.%d" % (40 + m))
     if cfg["cm_data_size"]:
         bs = n.Blockstore("cm%d-data" % m, "/mnt/data")

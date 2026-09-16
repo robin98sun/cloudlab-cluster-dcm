@@ -43,7 +43,8 @@ def request_for(params):
             cmds[f[1]] = " ".join(f[2:])
             continue
         if len(f) >= 4 and f[0] not in ("node", "LANs:"):
-            nodes[f[0]] = {"hw": f[1], "lan": f[2], "store": f[3]}
+            nodes[f[0]] = {"hw": f[1], "lan": f[2], "store": f[3],
+                           "image": f[4] if len(f) >= 5 else "-"}
         elif line.strip().startswith("LANs:"):
             lans.append(line.split(":", 1)[1].strip())
     for _n, _c in cmds.items():
@@ -508,6 +509,45 @@ class NoDropdowns(unittest.TestCase):
         for name in ("hw_type_custom", "storage_hw_type_custom",
                      "load_hw_type_custom", "ctl_hw_type_custom"):
             self.assertNotIn(name, ch, "%s should no longer exist" % name)
+
+
+class PerNodeDiskImage(unittest.TestCase):
+    """A CloudLab image is bound to the hardware types it was built for.
+
+    The golden image was baked on c6525-25g at Utah. Ask for a custom host
+    of a type it was never built for and the MAPPER refuses the entire
+    topology before anything boots:
+
+        *** No possible mapping for cm4
+            OS 'aces-project-01-PG0/DCM-dev.db1' does not run on this
+            hardware type!
+
+    No node logs that, because no node ran. The cure is a per-node image,
+    for the same reason hardware is already per-node.
+    """
+
+    def test_every_node_uses_the_golden_image_by_default(self):
+        nodes, _ = request_for(with_(cm1_hw_type="c6420"))
+        imgs = {n["image"] for n in nodes.values()}
+        self.assertEqual(len(imgs), 1,
+                         "one image everywhere unless asked otherwise: %s" % imgs)
+
+    def test_alt_image_applies_to_custom_hosts_only(self):
+        nodes, _ = request_for(with_(cm1_hw_type="c6420",
+                                     alt_disk_image="STOCK-IMAGE-URN"))
+        self.assertEqual(nodes["cm1"]["image"], "STOCK-IMAGE-URN")
+        for name, n in nodes.items():
+            if not name.startswith("cm"):
+                self.assertNotEqual(
+                    n["image"], "STOCK-IMAGE-URN",
+                    "%s must keep the golden image; only the hosts that "
+                    "cannot boot it pay the bake" % name)
+
+    def test_empty_alt_image_changes_nothing(self):
+        a, _ = request_for(with_(cm1_hw_type="c6420"))
+        b, _ = request_for(with_(cm1_hw_type="c6420", alt_disk_image=""))
+        self.assertEqual({k: v["image"] for k, v in a.items()},
+                         {k: v["image"] for k, v in b.items()})
 
 
 class CustomHosts(unittest.TestCase):
