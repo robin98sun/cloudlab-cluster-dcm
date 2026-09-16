@@ -49,8 +49,9 @@ Network: one experiment LAN 10.10.1.0/24. Monitoring and all k3s control
 traffic ride CloudLab's control network; measured pods use hostNetwork, so
 nothing latency-sensitive crosses an overlay.
 
-Address plan: ctl1 10.10.1.10; lg<i> 10.10.1.(10+i); fe<j> 10.10.1.(20+j);
-db<k> 10.10.1.(30+k).
+Address plan: ctl1 .10; lg<i> .(10+i); fe<j> .(100+j); db<k> .(150+k);
+cm<m> .(200+m). Strided so no tier can run into the next: ten slots each
+put fe11 on db1's address, and both counts DEFAULT to 10.
 """
 
 import geni.portal as portal
@@ -518,24 +519,47 @@ def role_args(name, own=""):
     return args
 
 
+# ADDRESS PLAN. Ten slots per tier put fe11 on db1's address and lg11 on
+# fe1's -- and num_fe_hosts and num_lg_hosts both DEFAULT to 10, so the
+# shipped configuration was one host from a collision, while the parameter
+# text recommends "10 frontends per 3 storage hosts" (a 4-host storage tier
+# at that ratio is 13 frontends, three addresses into the db range).
+#
+# Unlike the disk_image bug this one BOOTS. Two nodes take one address on one
+# LAN; there is no "No possible mapping" to read, just a host that is
+# unreachable or another answering its traffic, discovered at bring-up.
+#
+# Strided instead of guarded, so a slot still fixes an address no matter how
+# many other slots are filled -- the property the cm comment is careful about.
+LG_BASE, FE_BASE, DB_BASE, CM_BASE = 10, 100, 150, 200
+
 if SERVER_NODE == "ctl1":
-    ctl = make_node("ctl1", "ctl", CTL_ARGS + NODE_ARGS)
+    # --server EXPLICITLY. bootstrap.sh used to elect any ROLE=ctl node on its
+    # own, a second independent election that agreed with this one only
+    # because profile.py happens never to create a non-server ctl node. That
+    # invariant was stated nowhere on the bootstrap side, and anything adding
+    # a ctl node for another reason got two servers, no error, each forming
+    # its own cluster and both healthy locally. One election now (R109).
+    ctl = make_node("ctl1", "ctl", " --server" + CTL_ARGS + NODE_ARGS)
     attach(ctl, expt_lan, "10.10.1.10")
 
 for i in range(1, cfg["num_lg_hosts"] + 1):
     n = make_node("lg%d" % i, "lg", role_args("lg%d" % i),
-                  hw=cfg["load_hw_types"][i - 1])
-    attach(n, expt_lan, "10.10.1.%d" % (10 + i))
+                  hw=(cfg["load_hw_types"][i - 1]
+                     if cfg["load_hw_types"] else None))
+    attach(n, expt_lan, "10.10.1.%d" % (LG_BASE + i))
 
 for j in range(1, cfg["num_fe_hosts"] + 1):
     n = make_node("fe%d" % j, "fe", role_args("fe%d" % j),
-                  hw=cfg["fe_hw_types"][j - 1])
-    attach(n, expt_lan, "10.10.1.%d" % (20 + j))
+                  hw=(cfg["fe_hw_types"][j - 1]
+                     if cfg["fe_hw_types"] else None))
+    attach(n, expt_lan, "10.10.1.%d" % (FE_BASE + j))
 
 for k in range(1, cfg["num_db_hosts"] + 1):
     n = make_node("db%d" % k, "db", role_args("db%d" % k),
-                  hw=cfg["storage_hw_types"][k - 1])
-    attach(n, expt_lan, "10.10.1.%d" % (30 + k))
+                  hw=(cfg["storage_hw_types"][k - 1]
+                     if cfg["storage_hw_types"] else None))
+    attach(n, expt_lan, "10.10.1.%d" % (DB_BASE + k))
     if cfg["data_size"]:
         bs = n.Blockstore("db%d-data" % k, "/mnt/data")
         bs.size = cfg["data_size"]
@@ -548,7 +572,7 @@ for k in range(1, cfg["num_db_hosts"] + 1):
 for m, cm_hw in cfg["cm_hosts"]:
     n = make_node("cm%d" % m, "cm", role_args("cm%d" % m), hw=cm_hw,
                   image=cfg["alt_disk_image"] or None)
-    attach(n, expt_lan, "10.10.1.%d" % (40 + m))
+    attach(n, expt_lan, "10.10.1.%d" % (CM_BASE + m))
     if cfg["cm_data_size"]:
         bs = n.Blockstore("cm%d-data" % m, "/mnt/data")
         bs.size = cfg["cm_data_size"]

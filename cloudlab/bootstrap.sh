@@ -23,7 +23,13 @@ ROLE="${1:?usage: bootstrap.sh <ctl|fe|db|lg|cm> [opts]}"; shift || true
 IS_SERVER=0
 SERVER_NODE="ctl1"
 FE_HOSTS=1; DB_HOSTS=1; LG_HOSTS=0; FE_INSTANCES=3; CM_HOSTS=0
-[ "$ROLE" = ctl ] && IS_SERVER=1
+# NO implicit election here. This line used to be `[ "$ROLE" = ctl ] &&
+# IS_SERVER=1`, a SECOND election independent of profile.py's. The two agreed
+# only because profile.py happens never to create a non-server ctl node, and
+# nothing on this side said so. Any ctl node added for another reason -- a
+# jump box, monitoring, an edit -- produced two k3s servers with no error,
+# each forming its own cluster and each healthy when asked locally. The
+# profile now passes --server explicitly, so there is one election. (R109)
 while [ $# -gt 0 ]; do
     case "$1" in
         --server)       IS_SERVER=1;       shift 1 ;;

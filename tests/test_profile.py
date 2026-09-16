@@ -511,6 +511,51 @@ class NoDropdowns(unittest.TestCase):
             self.assertNotIn(name, ch, "%s should no longer exist" % name)
 
 
+class AddressPlan(unittest.TestCase):
+    """Two nodes must never share an address, at ANY tier size.
+
+    Ten slots per tier put fe11 on db1's address and lg11 on fe1's, and
+    num_fe_hosts and num_lg_hosts both DEFAULT to 10 -- the shipped
+    configuration was one host from a collision, while the parameter text
+    recommends "10 frontends per 3 storage hosts", which at four storage
+    hosts is thirteen.
+
+    This one BOOTS. There is no mapper refusal to read: two nodes take one
+    address on one LAN and it surfaces as an unreachable host, or a host
+    answering someone else's traffic, at bring-up.
+
+    The address was ALREADY printed by the stub and a test already asserted
+    slot->address stability. Nothing asserted the addresses were distinct,
+    which is a different gap from disk_image: that field the harness could
+    not see, this one it saw and no test questioned.
+    """
+
+    def _addrs(self, params):
+        nodes, _ = request_for(params)
+        return [n["lan"] for n in nodes.values() if n["lan"].startswith("10.")]
+
+    def test_no_two_nodes_share_an_address_at_the_defaults(self):
+        a = self._addrs(THREE_DB)
+        self.assertEqual(len(a), len(set(a)), sorted(a))
+
+    def test_no_collision_one_past_the_old_tier_width(self):
+        for params in (with_(num_fe_hosts=11), with_(num_lg_hosts=11),
+                       with_(num_db_hosts=11)):
+            a = self._addrs(params)
+            self.assertEqual(len(a), len(set(a)),
+                             "collision at %s: %s" % (params, sorted(a)))
+
+    def test_no_collision_at_the_documented_ratio(self):
+        # "10 frontends per 3 storage hosts" with a four-host storage tier
+        a = self._addrs(with_(num_db_hosts=4, num_fe_hosts=13, num_lg_hosts=13))
+        self.assertEqual(len(a), len(set(a)), sorted(a))
+
+    def test_every_filled_custom_slot_is_distinct_too(self):
+        params = {"cm%d_hw_type" % m: "c6420" for m in range(1, 11)}
+        a = self._addrs(with_(**params))
+        self.assertEqual(len(a), len(set(a)), sorted(a))
+
+
 class PerNodeDiskImage(unittest.TestCase):
     """A CloudLab image is bound to the hardware types it was built for.
 
@@ -591,11 +636,11 @@ class CustomHosts(unittest.TestCase):
                          ["cm1", "cm3"])
 
     def test_address_follows_the_slot_not_the_fill_order(self):
-        # cm3 is 10.10.1.43 whether or not cm2 was ever filled
+        # cm3 is 10.10.1.203 whether or not cm2 was ever filled
         only3, _ = request_for(with_(cm3_hw_type="c6420"))
         both, _ = request_for(with_(cm2_hw_type="c6320", cm3_hw_type="c6420"))
         self.assertEqual(only3["cm3"]["lan"], both["cm3"]["lan"])
-        self.assertTrue(only3["cm3"]["lan"].endswith(".43"),
+        self.assertTrue(only3["cm3"]["lan"].endswith(".203"),
                         only3["cm3"]["lan"])
 
     def test_custom_hosts_may_each_be_a_different_type(self):
@@ -624,7 +669,7 @@ class CustomHosts(unittest.TestCase):
         kw = {"cm%d_hw_type" % m: "c6420" for m in range(1, 11)}
         nodes, _ = request_for(with_(**kw))
         self.assertEqual(len([n for n in nodes if n.startswith("cm")]), 10)
-        self.assertTrue(nodes["cm10"]["lan"].endswith(".50"),
+        self.assertTrue(nodes["cm10"]["lan"].endswith(".210"),
                         nodes["cm10"]["lan"])
 
     def test_custom_hosts_do_not_disturb_the_named_tiers(self):

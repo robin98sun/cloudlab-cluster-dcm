@@ -16,6 +16,8 @@ class RawPC:
     def Blockstore(self, name, mount):
         b = _Blockstore(name, mount); self.blockstores.append(b); return b
 class LAN:
+    # bandwidth was stored and never printed, so client_bw was set-but-
+    # unobservable -- the same shape as disk_image, which cost an allocation.
     def __init__(self, name): self.name = name; self.ifaces = []; self.bandwidth = None
     def addInterface(self, i): self.ifaces.append(i)
 class Request:
@@ -39,5 +41,7 @@ class Request:
         for n in self.nodes:
             for sv in n.services:
                 print("  CMD %s %s" % (n.name, sv.command))
-        print("  LANs: %s" % ", ".join("%s(%d ifaces)" % (l.name, len(l.ifaces))
+        print("  LANs: %s" % ", ".join("%s(%d ifaces,bw=%s)"
+                                       % (l.name, len(l.ifaces),
+                                          l.bandwidth if l.bandwidth else "-")
                                        for l in self.lans))
