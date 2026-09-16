@@ -211,7 +211,7 @@ pc.defineParameter(
     longDescription="Hardware for ctl1.")
 pc.defineParameter(
     "alt_disk_image", "Disk image for hosts the golden image cannot boot",
-    portal.ParameterType.STRING, "",
+    portal.ParameterType.STRING, BASE_IMAGE,
     longDescription="A CloudLab image is bound to the hardware types it was "
                     "built for, and the golden image was baked on c6525-25g "
                     "at Utah. Ask for a custom host of a type it was not "
@@ -221,7 +221,17 @@ pc.defineParameter(
                     "log on any node explains it. Put a stock image here "
                     "(BASE_IMAGE in the source) and only the hosts that need "
                     "it use it, paying the bake at boot. Empty means every "
-                    "node uses the image below.")
+                    "node uses the image below.\n\n"
+                    "DEFAULTS TO THE STOCK IMAGE, deliberately. A custom slot "
+                    "exists to absorb whatever idle machine a cluster happens "
+                    "to have, so its hardware type is arbitrary by design -- "
+                    "which is precisely the case the golden image cannot "
+                    "cover. Defaulting these hosts to the golden image made "
+                    "the ordinary use of the feature refuse the WHOLE "
+                    "topology at map time, costing an allocation. A slower "
+                    "boot on one absorbed machine is worth more than a "
+                    "refusal of everything. Set this to the golden image URN "
+                    "if you know the type supports it.")
 pc.defineParameter(
     "disk_image", "Disk image URN", portal.ParameterType.STRING, GOLDEN_IMAGE,
     longDescription="Defaults to the golden image (~15-minute redeploy). Use "

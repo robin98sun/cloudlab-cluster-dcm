@@ -526,11 +526,22 @@ class PerNodeDiskImage(unittest.TestCase):
     for the same reason hardware is already per-node.
     """
 
-    def test_every_node_uses_the_golden_image_by_default(self):
+    def test_a_custom_host_never_refuses_the_topology_by_default(self):
+        # The failure this prevents is a MAP-TIME refusal of everything, not a
+        # slow boot on one machine. Default cm hosts to an image that maps on
+        # any hardware type.
         nodes, _ = request_for(with_(cm1_hw_type="c6420"))
-        imgs = {n["image"] for n in nodes.values()}
-        self.assertEqual(len(imgs), 1,
-                         "one image everywhere unless asked otherwise: %s" % imgs)
+        self.assertNotEqual(nodes["cm1"]["image"], nodes["db1"]["image"],
+                            "a custom slot takes arbitrary hardware, so it "
+                            "must not default to a type-bound image")
+        self.assertIn("UBUNTU", nodes["cm1"]["image"].upper())
+
+    def test_measured_roles_keep_the_golden_image(self):
+        nodes, _ = request_for(with_(cm1_hw_type="c6420"))
+        golden = nodes["db1"]["image"]
+        for name in ("db1", "fe1", "lg1"):
+            if name in nodes:
+                self.assertEqual(nodes[name]["image"], golden)
 
     def test_alt_image_applies_to_custom_hosts_only(self):
         nodes, _ = request_for(with_(cm1_hw_type="c6420",
@@ -543,11 +554,13 @@ class PerNodeDiskImage(unittest.TestCase):
                     "%s must keep the golden image; only the hosts that "
                     "cannot boot it pay the bake" % name)
 
-    def test_empty_alt_image_changes_nothing(self):
-        a, _ = request_for(with_(cm1_hw_type="c6420"))
-        b, _ = request_for(with_(cm1_hw_type="c6420", alt_disk_image=""))
-        self.assertEqual({k: v["image"] for k, v in a.items()},
-                         {k: v["image"] for k, v in b.items()})
+    def test_empty_alt_image_is_the_escape_hatch(self):
+        # Explicitly empty means "one image everywhere", for the case where
+        # the custom host's type IS covered by the golden image and the bake
+        # is not worth paying.
+        nodes, _ = request_for(with_(cm1_hw_type="c6420", alt_disk_image=""))
+        self.assertEqual(nodes["cm1"]["image"], nodes["db1"]["image"])
+        self.assertEqual(len({n["image"] for n in nodes.values()}), 1)
 
 
 class CustomHosts(unittest.TestCase):
