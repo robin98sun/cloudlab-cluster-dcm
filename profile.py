@@ -493,8 +493,29 @@ _cm_slots = [_m for _m, _ in cfg["cm_hosts"]]
 _first_cm = min(_cm_slots) if _cm_slots else None
 if cfg["dedicated_ctl"]:
     SERVER_NODE = "ctl1"
-elif cfg["num_db_hosts"] > 0:
-    SERVER_NODE = "db1"
+# A STORAGE HOST NEVER CARRIES THE CONTROL PLANE. db1 used to be the first
+# choice here whenever dedicated_ctl was false, which put k3s -- apiserver,
+# etcd/sqlite, scheduler, controller-manager -- on the same machine as a
+# raft replica whose leadership behaviour is the measured quantity.
+#
+# That is not a tidiness rule. The storage pods are Guaranteed and
+# cpuset-pinned, so the control plane competes for the cores OUTSIDE the
+# pinned set, for the same disk the WAL fsyncs to, and for the same NIC the
+# raft heartbeats cross. Every one of those is a documented churn mechanism:
+# heartbeat starvation past the 1,000 ms timeout is the proximate cause of
+# every churning rung this project has recorded. A campaign run this way
+# cannot separate "the database churned under load" from "the apiserver
+# stole the disk", and the confound lands on exactly one of the three
+# replicas -- the one that is also the k3s server -- which is worse than a
+# uniform bias because it breaks the symmetry between voters.
+#
+# Robin, 2026-09-18: "no DB node can be used as ctrl node. if it happens,
+# relocate the leader to something else but not DB node."
+#
+# So db1 is not a candidate at all. With no fe/lg/cm host to take it, the
+# fall-through below elects ctl1 and make_node() materialises that node,
+# which is the relocation: the profile grows a control machine rather than
+# contaminating a storage one.
 elif cfg["num_fe_hosts"] > 0:
     SERVER_NODE = "fe1"
 elif cfg["num_lg_hosts"] > 0:

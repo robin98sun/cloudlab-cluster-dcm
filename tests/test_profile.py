@@ -72,20 +72,37 @@ class ControlPlanePlacement(unittest.TestCase):
         self.assertIn("--server-node ctl1", nodes["db1"]["cmd"])
         self.assertNotIn("--server ", nodes["db1"]["cmd"])
 
-    def test_co_located_puts_the_server_on_db1_and_drops_ctl1(self):
+    def test_a_storage_host_never_carries_the_control_plane(self):
+        # Was: co-location put the server on db1 and dropped ctl1. A raft
+        # replica may not also be the k3s server -- the apiserver competes
+        # for the disk the WAL fsyncs to and the NIC the heartbeats cross,
+        # on ONE of the three voters, which is the churn mechanism under
+        # study wearing the costume of a result.
         nodes, _ = request_for(with_(dedicated_ctl=False))
-        self.assertNotIn("ctl1", nodes)
-        cmd = nodes["db1"]["cmd"]
-        self.assertIn("bootstrap.sh db", cmd)      # keeps its own role
-        self.assertIn("--server", cmd)             # and runs the control plane
-        self.assertIn("--fe-hosts", cmd)           # with the control args
-        for other in ("db2", "db3", "fe1"):
-            self.assertIn("--server-node db1", nodes[other]["cmd"])
-            self.assertNotIn("--server ", nodes[other]["cmd"])
+        for db in ("db1", "db2", "db3"):
+            self.assertNotIn("--server ", nodes[db]["cmd"],
+                             "%s must not run the control plane" % db)
+            self.assertNotIn("--server-node db", nodes[db]["cmd"])
+        # it went to the frontend tier instead, and every node agrees
+        self.assertIn("--server", nodes["fe1"]["cmd"])
+        for other in ("db1", "db2", "db3"):
+            self.assertIn("--server-node fe1", nodes[other]["cmd"])
+
+    def test_storage_only_request_grows_a_control_node(self):
+        # Nothing but storage: rather than contaminate db1, the profile
+        # materialises ctl1. Relocation, not co-location.
+        nodes, _ = request_for(with_(dedicated_ctl=False, num_fe_hosts=0,
+                                     num_lg_hosts=0))
+        self.assertIn("ctl1", nodes)
+        self.assertIn("--server", nodes["ctl1"]["cmd"])
+        for db in ("db1", "db2", "db3"):
+            self.assertNotIn("--server ", nodes[db]["cmd"])
+            self.assertIn("--server-node ctl1", nodes[db]["cmd"])
 
     def test_co_location_falls_back_through_the_roles(self):
-        # No storage -> frontend; no frontend either -> load; none at all ->
-        # a dedicated ctl1, because an empty request answers nothing.
+        # Storage is never a candidate, so the order is frontend -> load ->
+        # custom slot -> a dedicated ctl1, because an empty request answers
+        # nothing.
         n, _ = request_for(with_(dedicated_ctl=False, num_db_hosts=0))
         self.assertIn("--server", n["fe1"]["cmd"])
         n, _ = request_for(with_(dedicated_ctl=False, num_db_hosts=0,
