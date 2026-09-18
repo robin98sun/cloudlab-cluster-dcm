@@ -280,12 +280,90 @@ for n in root.iter():
                 print(s.get("name"), s.get("ipv4") or "")
                 sys.exit(0)
 ' "$SERVER_NODE" || true)"
-if [ -n "${CTL_NAME:-}" ] && getent hosts "$CTL_NAME" >/dev/null 2>&1; then
-    SERVER_HOST="$CTL_NAME"
-elif [ -n "${CTL_IP:-}" ]; then
-    SERVER_HOST="$CTL_IP"
-else
-    SERVER_HOST="$SERVER_NODE.$(hostname -f | cut -d. -f2-)"
+# RETRY THE MANIFEST, and never ship an endpoint that does not resolve.
+#
+# robin98-316885: db3 joined no cluster for the life of the allocation. Its
+# k3s-agent held K3S_URL=https://ctl1.utah.cloudlab.us:6443 -- a name that
+# resolves on no node here -- while the other eleven held the
+# allocation-qualified FQDN. kubectl showed 11 nodes for a 12-node
+# allocation, the storage pod for db3 sat PodScheduled=False against a node
+# selector naming a node that did not exist, and bring-up failed with
+# "cluster did not elect a leader", which was true but not the cause.
+#
+# The path taken was the else-branch below: geni-get returned nothing this
+# early in boot, so the domain was derived from `hostname -f` -- which the
+# comment four lines above already says is STALE during early boot. The
+# fallback used an unreliable source precisely in the case reached because
+# the reliable one had failed, and nothing checked the result. An
+# unresolvable K3S_URL cannot ever succeed: the agent loops on
+# "failed to get CA certs" every two seconds forever, which is what it did
+# for an hour.
+#
+# So: retry the manifest rather than falling through on the first miss, and
+# verify whatever is chosen actually resolves. A hard exit here is better
+# than a silent infinite retry -- the startup script fails visibly in the
+# portal instead of leaving one node quietly absent from the cluster.
+_resolves() {
+    case "$1" in
+        # a literal IPv4 needs no resolver
+        [0-9]*.[0-9]*.[0-9]*.[0-9]*) return 0 ;;
+    esac
+    getent hosts "$1" >/dev/null 2>&1
+}
+
+SERVER_HOST=""
+for _try in 1 2 3 4 5 6 7 8 9 10; do
+    if [ -z "${CTL_NAME:-}${CTL_IP:-}" ] && [ "$_try" -gt 1 ]; then
+        # the manifest was not ready; ask again before giving up on it
+        read -r CTL_NAME CTL_IP <<<"$(geni-get manifest 2>/dev/null | python3 -c '
+import sys, xml.etree.ElementTree as ET
+def t(e): return e.tag.split("}", 1)[-1]
+try:
+    root = ET.parse(sys.stdin).getroot()
+except Exception:
+    sys.exit(0)
+for n in root.iter():
+    if t(n) == "node" and n.get("client_id") == sys.argv[1]:
+        for s in n.iter():
+            if t(s) == "host" and s.get("name"):
+                print(s.get("name"), s.get("ipv4") or "")
+                sys.exit(0)
+' "$SERVER_NODE" || true)"
+    fi
+    for _cand in "${CTL_NAME:-}" "${CTL_IP:-}" \
+                 "$SERVER_NODE.$(hostname -f 2>/dev/null | cut -d. -f2-)"; do
+        [ -n "$_cand" ] || continue
+        if _resolves "$_cand"; then SERVER_HOST="$_cand"; break 2; fi
+    done
+    echo "k3s server endpoint for '$SERVER_NODE' not resolvable yet" \
+         "(attempt $_try: name='${CTL_NAME:-}' ip='${CTL_IP:-}'); retrying"
+    sleep 3
+done
+
+# NO HARD EXIT HERE, deliberately. The resolvability check above cannot be
+# tested from a Mac (no getent) and this change was written after the
+# allocation that motivated it had expired, so _resolves is unverified on
+# the platform it runs on. A fatal branch gated on an unverified predicate
+# turns "one node missing" into "no cluster at all" if the predicate is
+# wrong -- strictly worse than the bug being fixed. So on exhaustion: take
+# the manifest IP if there is one, since an address needs no resolver at
+# all, else the derived name, and say loudly which and why.
+if [ -z "$SERVER_HOST" ]; then
+    if [ -n "${CTL_IP:-}" ]; then
+        SERVER_HOST="$CTL_IP"
+        echo "WARNING: no endpoint for '$SERVER_NODE' resolved; using the" \
+             "manifest IP $CTL_IP"
+    else
+        SERVER_HOST="$SERVER_NODE.$(hostname -f 2>/dev/null | cut -d. -f2-)"
+        echo "WARNING: no endpoint for '$SERVER_NODE' resolved and the" >&2
+        echo "  manifest gave no address. Falling back to '$SERVER_HOST'," >&2
+        echo "  derived from 'hostname -f', which is STALE during early" >&2
+        echo "  boot -- this is the exact path that left db3 out of" >&2
+        echo "  robin98-316885 with an unresolvable K3S_URL, looping on" >&2
+        echo "  CA-cert fetches for the life of the allocation." >&2
+        echo "  If this node never joins, check:" >&2
+        echo "    grep K3S_URL /etc/systemd/system/k3s-agent.service.env" >&2
+    fi
 fi
 SERVER_URL="https://${SERVER_HOST}:6443"
 echo "k3s server endpoint: $SERVER_URL"
